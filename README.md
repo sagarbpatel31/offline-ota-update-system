@@ -74,6 +74,15 @@ python -m agent.main init-layout
 python -m agent.main install --activate-command "systemctl restart offline-ota-demo.service"
 ```
 
+### Discover bundles from USB or local HTTP
+
+```bash
+python -m agent.main discover-usb --mount-root /media
+python -m agent.main discover-http http://192.168.1.50:8081/
+python -m agent.main list-discovered
+python -m agent.main install-discovered --index 0 --activate-command "systemctl restart offline-ota-demo.service"
+```
+
 ### Inspect device status and update history
 
 ```bash
@@ -81,6 +90,7 @@ python -m agent.main device-status
 curl http://127.0.0.1:8000/api/status
 curl http://127.0.0.1:8000/api/history
 curl http://127.0.0.1:8000/api/service
+curl http://127.0.0.1:8000/api/discovered
 ```
 
 ### Run the local dashboard
@@ -111,12 +121,13 @@ This repository is scaffolded for MVP implementation. The current code provides:
 - staged install copying, active symlink promotion, and rollback primitives
 - health-check-driven install flow with JSON state tracking
 - Raspberry Pi demo service with release-aware metadata
+- USB and local HTTP bundle discovery with cached candidates
 - starter FastAPI dashboard
 - starter agent CLI
 - systemd service skeleton
 
 ## Next Milestones
 
-- Wire install promotion to a service restart hook
-- Add USB and local HTTP bundle discovery
+- Enforce device/version policy during install
 - Add update audit log and dashboard views
+- Add Raspberry Pi USB mount automation and service integration

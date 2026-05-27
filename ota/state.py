@@ -23,6 +23,7 @@ class DeviceStateStore:
             "active_version": None,
             "candidate_version": None,
             "previous_version": None,
+            "discovered_bundles": [],
             "last_error": None,
             "last_checked_at": None,
             "last_updated_at": None,

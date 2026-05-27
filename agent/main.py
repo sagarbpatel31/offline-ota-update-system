@@ -11,6 +11,7 @@ import typer
 
 from ota.bundle import BundleManifest, VerifiedBundle, load_signed_manifest, sha256_file
 from ota.crypto import verify_manifest_signature
+from ota.discovery import DiscoveryCandidate, discover_usb_candidates, download_http_bundle
 from ota.release import (
     ReleaseLayout,
     active_version,
@@ -247,6 +248,16 @@ def install_bundle_flow(
     return state_store.load()
 
 
+def save_discovered_candidates(candidates: list[DiscoveryCandidate]) -> list[dict[str, str | None]]:
+    payload = [candidate.as_dict() for candidate in candidates]
+    STATE_STORE.update(discovered_bundles=payload, update_state=UpdateState.idle.value, last_checked_at=utc_now())
+    return payload
+
+
+def discovered_candidates() -> list[dict[str, str | None]]:
+    return STATE_STORE.load().get("discovered_bundles", [])
+
+
 @app.command()
 def verify(
     bundle_path: Path = Path("manifests/signed-bundle.json"),
@@ -293,6 +304,58 @@ def install(
     activate_command: str | None = DEFAULT_ACTIVATE_COMMAND,
 ) -> None:
     payload = install_bundle_flow(bundle_path, public_key, bundle_dir, root, activate_command)
+    typer.echo(json.dumps(payload, indent=2))
+
+
+@app.command("discover-usb")
+def discover_usb(
+    mount_root: Path = Path("/media"),
+) -> None:
+    STATE_STORE.update(update_state=UpdateState.discovering.value, last_error=None, last_checked_at=utc_now())
+    candidates = discover_usb_candidates(mount_root)
+    payload = save_discovered_candidates(candidates)
+    typer.echo(json.dumps(payload, indent=2))
+
+
+@app.command("discover-http")
+def discover_http(
+    base_url: str,
+) -> None:
+    STATE_STORE.update(update_state=UpdateState.discovering.value, last_error=None, last_checked_at=utc_now())
+    candidate = download_http_bundle(base_url)
+    payload = save_discovered_candidates([candidate])
+    typer.echo(json.dumps(payload, indent=2))
+
+
+@app.command("list-discovered")
+def list_discovered() -> None:
+    typer.echo(json.dumps(discovered_candidates(), indent=2))
+
+
+@app.command("install-discovered")
+def install_discovered(
+    index: int = 0,
+    root: Path = LAYOUT.root,
+    activate_command: str | None = DEFAULT_ACTIVATE_COMMAND,
+) -> None:
+    candidates = discovered_candidates()
+    if not candidates:
+        raise typer.BadParameter("no discovered bundles available")
+    if index < 0 or index >= len(candidates):
+        raise typer.BadParameter(f"discovery index out of range: {index}")
+
+    candidate = candidates[index]
+    public_key = candidate.get("public_key_path")
+    if not public_key:
+        raise typer.BadParameter("discovered bundle is missing a public key path")
+
+    payload = install_bundle_flow(
+        bundle_path=Path(candidate["bundle_path"]),
+        public_key=Path(public_key),
+        bundle_dir=Path(candidate["bundle_dir"]),
+        root=root,
+        activate_command=activate_command,
+    )
     typer.echo(json.dumps(payload, indent=2))
 
 

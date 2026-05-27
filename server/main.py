@@ -38,3 +38,8 @@ def history() -> list[dict[str, object]]:
 @app.get("/api/service")
 def service() -> dict[str, object]:
     return service_metadata()
+
+
+@app.get("/api/discovered")
+def discovered() -> list[dict[str, object]]:
+    return STATE_STORE.load().get("discovered_bundles", [])
