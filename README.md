@@ -65,6 +65,21 @@ python -m signer.main sign-bundle manifests/bundle.manifest.json
 python -m agent.main verify
 ```
 
+### Install a signed bundle
+
+```bash
+python -m agent.main init-layout
+python -m agent.main install
+```
+
+### Inspect device status and update history
+
+```bash
+python -m agent.main device-status
+curl http://127.0.0.1:8000/api/status
+curl http://127.0.0.1:8000/api/history
+```
+
 ### Run the local dashboard
 
 ```bash
@@ -84,7 +99,8 @@ This repository is scaffolded for MVP implementation. The current code provides:
 - basic project structure
 - Ed25519 key generation, manifest hashing, and bundle signing
 - bundle verification against artifact hashes and public key
-- staged release directory scaffolding for app-level OTA
+- staged install copying, active symlink promotion, and rollback primitives
+- health-check-driven install flow with JSON state tracking
 - starter FastAPI dashboard
 - starter agent CLI
 - systemd service skeleton
@@ -92,6 +108,6 @@ This repository is scaffolded for MVP implementation. The current code provides:
 ## Next Milestones
 
 - Add staged install copying and symlink-based release switching
-- Add post-install health checks and rollback state machine
+- Wire staged install to a Raspberry Pi demo service
 - Add USB and local HTTP bundle discovery
 - Add update audit log and dashboard views

@@ -6,11 +6,12 @@
 - Artifact hashing with `sha256`
 - Ed25519 key generation, signing, and verification
 - Release directory layout scaffold for app-level OTA
+- Staged artifact copy, health-check verification, and rollback flow
+- JSON device state tracking and dashboard history endpoint
 
 ## Next
 
-- Copy verified artifacts into staged release directories
-- Add active symlink promotion and previous-release tracking
-- Add health-check execution and rollback on failure
-- Persist update lifecycle history in JSONL format
-- Wire the dashboard to real agent state
+- Wire installed release content to a real demo service
+- Add bundle discovery from USB and local HTTP
+- Enforce version compatibility and anti-downgrade policy
+- Add tests for install success and rollback scenarios

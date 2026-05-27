@@ -2,12 +2,24 @@ import json
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import urlopen
 
 import typer
 
 from ota.bundle import BundleManifest, VerifiedBundle, load_signed_manifest, sha256_file
 from ota.crypto import verify_manifest_signature
-from ota.release import ReleaseLayout, active_version, append_history, promote_release, stage_release
+from ota.release import (
+    ReleaseLayout,
+    active_version,
+    append_history,
+    copy_bundle_artifacts,
+    previous_version,
+    promote_release,
+    rollback_release,
+    stage_release,
+)
+from ota.state import DeviceStateStore, utc_now
 
 
 app = typer.Typer(help="Offline OTA device agent")
@@ -27,12 +39,12 @@ class UpdateState(str, Enum):
 
 STATE_FILE = Path("artifacts/device-state.txt")
 LAYOUT = ReleaseLayout(Path("artifacts/device"))
+STATE_STORE = DeviceStateStore(Path("artifacts/device-state.json"))
 
 
 def read_state() -> str:
-    if not STATE_FILE.exists():
-        return UpdateState.idle.value
-    return STATE_FILE.read_text().strip() or UpdateState.idle.value
+    payload = STATE_STORE.load()
+    return payload["update_state"]
 
 
 @app.command()
@@ -44,6 +56,7 @@ def status() -> None:
 def set_state(state: UpdateState) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(state.value)
+    STATE_STORE.update(update_state=state.value)
     typer.echo(f"device_state={state.value}")
 
 
@@ -66,6 +79,120 @@ def verify_bundle(bundle_path: Path, public_key: Path, bundle_dir: Path) -> Veri
     return VerifiedBundle(envelope=envelope, manifest_path=bundle_path)
 
 
+def record_event(layout: ReleaseLayout, event: str, **payload: str | None) -> None:
+    append_history(
+        layout,
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            **payload,
+        },
+    )
+
+
+def run_health_check(manifest: BundleManifest) -> tuple[bool, str | None]:
+    if manifest.health_check.type != "http":
+        return False, f"unsupported health check type: {manifest.health_check.type}"
+
+    try:
+        with urlopen(manifest.health_check.endpoint, timeout=manifest.health_check.timeout_seconds) as response:
+            if 200 <= response.status < 300:
+                return True, None
+            return False, f"health check returned status {response.status}"
+    except URLError as error:
+        return False, str(error)
+
+
+def install_bundle_flow(
+    bundle_path: Path,
+    public_key: Path,
+    bundle_dir: Path,
+    root: Path,
+) -> dict[str, str | None]:
+    release_layout = ReleaseLayout(root)
+    state_store = STATE_STORE
+    state_store.update(update_state=UpdateState.validating.value, last_error=None, last_checked_at=utc_now())
+
+    verified_bundle = verify_bundle(bundle_path, public_key, bundle_dir)
+    manifest = verified_bundle.envelope.manifest
+
+    state_store.update(candidate_version=manifest.version, device_model=manifest.device_model)
+    record_event(release_layout, "verified", version=manifest.version)
+
+    state_store.update(
+        update_state=UpdateState.staging.value,
+        previous_version=active_version(release_layout),
+    )
+    stage_release(release_layout, manifest.version)
+    copy_bundle_artifacts(release_layout, manifest.version, bundle_dir)
+    record_event(release_layout, "staged", version=manifest.version)
+
+    state_store.update(update_state=UpdateState.switching.value)
+    promote_release(release_layout, manifest.version)
+    record_event(
+        release_layout,
+        "promote",
+        version=manifest.version,
+        previous_version=previous_version(release_layout),
+    )
+
+    state_store.update(
+        update_state=UpdateState.verifying.value,
+        active_version=manifest.version,
+        last_checked_at=utc_now(),
+    )
+    healthy, error = run_health_check(manifest)
+    if healthy:
+        state_store.update(
+            update_state=UpdateState.success.value,
+            active_version=manifest.version,
+            candidate_version=None,
+            last_error=None,
+            last_checked_at=utc_now(),
+        )
+        record_event(release_layout, "health_check_passed", version=manifest.version)
+        return state_store.load()
+
+    state_store.update(update_state=UpdateState.rollback.value, last_error=error, last_checked_at=utc_now())
+    record_event(release_layout, "health_check_failed", version=manifest.version, error=error)
+
+    rollback_target = previous_version(release_layout)
+    if not rollback_target:
+        state_store.update(
+            update_state=UpdateState.failed.value,
+            active_version=active_version(release_layout),
+            candidate_version=manifest.version,
+            previous_version=None,
+            last_error=error,
+            last_checked_at=utc_now(),
+        )
+        record_event(
+            release_layout,
+            "rollback_unavailable",
+            version=manifest.version,
+            error=error,
+        )
+        return state_store.load()
+
+    rolled_back_version = rollback_release(release_layout)
+    state_store.update(
+        update_state=UpdateState.failed.value,
+        active_version=rolled_back_version,
+        candidate_version=manifest.version,
+        previous_version=previous_version(release_layout),
+        last_error=error,
+        last_checked_at=utc_now(),
+    )
+    record_event(
+        release_layout,
+        "rollback",
+        version=manifest.version,
+        restored_version=rolled_back_version,
+        error=error,
+    )
+    return state_store.load()
+
+
 @app.command()
 def verify(
     bundle_path: Path = Path("manifests/signed-bundle.json"),
@@ -83,6 +210,7 @@ def verify(
 def init_layout(root: Path = LAYOUT.root) -> None:
     layout = ReleaseLayout(root)
     layout.ensure()
+    STATE_STORE.save(STATE_STORE.load())
     typer.echo(f"initialized release layout at {root}")
 
 
@@ -97,16 +225,39 @@ def promote(version: str, root: Path = LAYOUT.root) -> None:
     release_layout = ReleaseLayout(root)
     previous_version = active_version(release_layout)
     promote_release(release_layout, version)
-    append_history(
-        release_layout,
-        {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "event": "promote",
-            "version": version,
-            "previous_version": previous_version,
-        },
-    )
+    STATE_STORE.update(active_version=version, previous_version=previous_version)
+    record_event(release_layout, "promote", version=version, previous_version=previous_version)
     typer.echo(f"promoted active release to {version}")
+
+
+@app.command()
+def install(
+    bundle_path: Path = Path("manifests/signed-bundle.json"),
+    public_key: Path = Path("keys/offline-ota-public.pem"),
+    bundle_dir: Path = Path("artifacts/bundle"),
+    root: Path = LAYOUT.root,
+) -> None:
+    payload = install_bundle_flow(bundle_path, public_key, bundle_dir, root)
+    typer.echo(json.dumps(payload, indent=2))
+
+
+@app.command()
+def rollback(root: Path = LAYOUT.root) -> None:
+    release_layout = ReleaseLayout(root)
+    restored_version = rollback_release(release_layout)
+    STATE_STORE.update(
+        update_state=UpdateState.failed.value,
+        active_version=restored_version,
+        candidate_version=None,
+        previous_version=previous_version(release_layout),
+    )
+    record_event(release_layout, "manual_rollback", restored_version=restored_version)
+    typer.echo(f"rolled back to {restored_version}")
+
+
+@app.command()
+def device_status() -> None:
+    typer.echo(json.dumps(STATE_STORE.load(), indent=2))
 
 
 @app.command()
