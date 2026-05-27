@@ -1,0 +1,15 @@
+[Unit]
+Description=Offline OTA Demo Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/offline-ota
+Environment=OFFLINE_OTA_RELEASE_ROOT=/opt/offline-ota/artifacts/device/active
+ExecStart=/usr/bin/python3 -m uvicorn demo_service.app:app --host 0.0.0.0 --port 8080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

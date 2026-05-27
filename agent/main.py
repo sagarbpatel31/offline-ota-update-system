@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -40,6 +42,7 @@ class UpdateState(str, Enum):
 STATE_FILE = Path("artifacts/device-state.txt")
 LAYOUT = ReleaseLayout(Path("artifacts/device"))
 STATE_STORE = DeviceStateStore(Path("artifacts/device-state.json"))
+DEFAULT_ACTIVATE_COMMAND = os.getenv("OFFLINE_OTA_ACTIVATE_COMMAND")
 
 
 def read_state() -> str:
@@ -103,11 +106,32 @@ def run_health_check(manifest: BundleManifest) -> tuple[bool, str | None]:
         return False, str(error)
 
 
+def run_activation_hook(command: str | None, root: Path) -> tuple[bool, str | None]:
+    if not command:
+        return True, None
+
+    environment = os.environ.copy()
+    environment["OFFLINE_OTA_RELEASE_ROOT"] = str((root / "active").resolve())
+    completed = subprocess.run(
+        command,
+        shell=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+    if completed.returncode == 0:
+        return True, None
+    stderr = completed.stderr.strip()
+    stdout = completed.stdout.strip()
+    return False, stderr or stdout or f"activation hook failed with exit code {completed.returncode}"
+
+
 def install_bundle_flow(
     bundle_path: Path,
     public_key: Path,
     bundle_dir: Path,
     root: Path,
+    activate_command: str | None = DEFAULT_ACTIVATE_COMMAND,
 ) -> dict[str, str | None]:
     release_layout = ReleaseLayout(root)
     state_store = STATE_STORE
@@ -135,6 +159,36 @@ def install_bundle_flow(
         version=manifest.version,
         previous_version=previous_version(release_layout),
     )
+
+    activated, activation_error = run_activation_hook(activate_command, root)
+    if not activated:
+        state_store.update(
+            update_state=UpdateState.failed.value,
+            active_version=active_version(release_layout),
+            candidate_version=manifest.version,
+            previous_version=previous_version(release_layout),
+            last_error=activation_error,
+            last_checked_at=utc_now(),
+        )
+        record_event(
+            release_layout,
+            "activation_failed",
+            version=manifest.version,
+            error=activation_error,
+        )
+        rollback_target = previous_version(release_layout)
+        if rollback_target:
+            rolled_back_version = rollback_release(release_layout)
+            run_activation_hook(activate_command, root)
+            state_store.update(active_version=rolled_back_version, previous_version=previous_version(release_layout))
+            record_event(
+                release_layout,
+                "rollback",
+                version=manifest.version,
+                restored_version=rolled_back_version,
+                error=activation_error,
+            )
+        return state_store.load()
 
     state_store.update(
         update_state=UpdateState.verifying.value,
@@ -236,8 +290,9 @@ def install(
     public_key: Path = Path("keys/offline-ota-public.pem"),
     bundle_dir: Path = Path("artifacts/bundle"),
     root: Path = LAYOUT.root,
+    activate_command: str | None = DEFAULT_ACTIVATE_COMMAND,
 ) -> None:
-    payload = install_bundle_flow(bundle_path, public_key, bundle_dir, root)
+    payload = install_bundle_flow(bundle_path, public_key, bundle_dir, root, activate_command)
     typer.echo(json.dumps(payload, indent=2))
 
 

@@ -21,6 +21,7 @@ Local-first OTA update system for Linux edge devices with signed update bundles,
 ## Repository Layout
 
 - `agent/` device updater daemon and state machine
+- `demo_service/` Raspberry Pi demo app and release builder
 - `server/` local dashboard and API
 - `signer/` bundle manifest and signing tool
 - `device/` install scripts and systemd units
@@ -55,7 +56,8 @@ python -m signer.main generate-keys
 ### Build and sign a bundle manifest
 
 ```bash
-python -m signer.main build-manifest artifacts/bundle --version 1.1.0
+python -m demo_service.build_release 1.1.0
+python -m signer.main build-manifest artifacts/bundle 1.1.0
 python -m signer.main sign-bundle manifests/bundle.manifest.json
 ```
 
@@ -69,7 +71,7 @@ python -m agent.main verify
 
 ```bash
 python -m agent.main init-layout
-python -m agent.main install
+python -m agent.main install --activate-command "systemctl restart offline-ota-demo.service"
 ```
 
 ### Inspect device status and update history
@@ -78,6 +80,7 @@ python -m agent.main install
 python -m agent.main device-status
 curl http://127.0.0.1:8000/api/status
 curl http://127.0.0.1:8000/api/history
+curl http://127.0.0.1:8000/api/service
 ```
 
 ### Run the local dashboard
@@ -86,10 +89,16 @@ curl http://127.0.0.1:8000/api/history
 uvicorn server.main:app --reload
 ```
 
-### Run the agent stub
+### Run the Raspberry Pi demo service
 
 ```bash
-python -m agent.main status
+uvicorn demo_service.app:app --host 0.0.0.0 --port 8080
+```
+
+### Raspberry Pi activation hook
+
+```bash
+export OFFLINE_OTA_ACTIVATE_COMMAND="systemctl restart offline-ota-demo.service"
 ```
 
 ## Current Status
@@ -101,13 +110,13 @@ This repository is scaffolded for MVP implementation. The current code provides:
 - bundle verification against artifact hashes and public key
 - staged install copying, active symlink promotion, and rollback primitives
 - health-check-driven install flow with JSON state tracking
+- Raspberry Pi demo service with release-aware metadata
 - starter FastAPI dashboard
 - starter agent CLI
 - systemd service skeleton
 
 ## Next Milestones
 
-- Add staged install copying and symlink-based release switching
-- Wire staged install to a Raspberry Pi demo service
+- Wire install promotion to a service restart hook
 - Add USB and local HTTP bundle discovery
 - Add update audit log and dashboard views

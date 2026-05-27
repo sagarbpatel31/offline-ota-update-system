@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
+from demo_service.app import service_metadata
 from ota.release import ReleaseLayout, active_version
 from ota.state import DeviceStateStore
 
@@ -23,6 +24,7 @@ def status() -> dict[str, object]:
     payload = STATE_STORE.load()
     payload["active_version"] = active_version(LAYOUT) or payload["active_version"]
     payload["last_checked_at"] = payload["last_checked_at"] or datetime.now(timezone.utc).isoformat()
+    payload["service"] = service_metadata()
     return payload
 
 
@@ -31,3 +33,8 @@ def history() -> list[dict[str, object]]:
     if not LAYOUT.history_file.exists():
         return []
     return [json.loads(line) for line in LAYOUT.history_file.read_text().splitlines() if line.strip()]
+
+
+@app.get("/api/service")
+def service() -> dict[str, object]:
+    return service_metadata()
