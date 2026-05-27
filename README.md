@@ -46,6 +46,25 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### Generate signing keys
+
+```bash
+python -m signer.main generate-keys
+```
+
+### Build and sign a bundle manifest
+
+```bash
+python -m signer.main build-manifest artifacts/bundle --version 1.1.0
+python -m signer.main sign-bundle manifests/bundle.manifest.json
+```
+
+### Verify a signed bundle
+
+```bash
+python -m agent.main verify
+```
+
 ### Run the local dashboard
 
 ```bash
@@ -63,16 +82,16 @@ python -m agent.main status
 This repository is scaffolded for MVP implementation. The current code provides:
 
 - basic project structure
+- Ed25519 key generation, manifest hashing, and bundle signing
+- bundle verification against artifact hashes and public key
+- staged release directory scaffolding for app-level OTA
 - starter FastAPI dashboard
 - starter agent CLI
-- sample manifest format
 - systemd service skeleton
 
 ## Next Milestones
 
-- Implement signed bundle creation and verification
-- Add staged install and symlink-based release switching
+- Add staged install copying and symlink-based release switching
 - Add post-install health checks and rollback state machine
 - Add USB and local HTTP bundle discovery
 - Add update audit log and dashboard views
-

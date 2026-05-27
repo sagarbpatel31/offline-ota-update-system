@@ -31,4 +31,3 @@
 - Add bad update injection scenario
 - Record demo walkthrough
 - Add tests for manifest validation and rollback logic
-

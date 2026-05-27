@@ -23,6 +23,8 @@
 - Use **release directories + active symlink** for safe switching
 - Use **FastAPI** for the dashboard and local control plane
 - Keep bundle delivery local-first: USB and HTTP on a trusted LAN
+- Use **Ed25519** signatures over a canonicalized JSON manifest
+- Verify artifact hashes before any staging action begins
 
 ## v2 Expansion
 
@@ -31,4 +33,3 @@
 - Multi-device rollout rings
 - Stronger key management
 - Signed audit history
-

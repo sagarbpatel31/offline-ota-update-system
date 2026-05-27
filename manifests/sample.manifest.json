@@ -5,6 +5,7 @@
   "artifacts": [
     {
       "name": "demo-service.tar.gz",
+      "path": "artifacts/demo-service.tar.gz",
       "sha256": "replace-with-real-sha256",
       "size_bytes": 0
     }
