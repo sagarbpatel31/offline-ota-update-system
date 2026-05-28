@@ -12,6 +12,7 @@ import typer
 from ota.bundle import BundleManifest, VerifiedBundle, load_signed_manifest, sha256_file
 from ota.crypto import verify_manifest_signature
 from ota.discovery import DiscoveryCandidate, discover_usb_candidates, download_http_bundle
+from ota.policy import evaluate_manifest_policy
 from ota.release import (
     ReleaseLayout,
     active_version,
@@ -136,12 +137,39 @@ def install_bundle_flow(
 ) -> dict[str, str | None]:
     release_layout = ReleaseLayout(root)
     state_store = STATE_STORE
-    state_store.update(update_state=UpdateState.validating.value, last_error=None, last_checked_at=utc_now())
+    device_state = state_store.load()
+    state_store.update(
+        update_state=UpdateState.validating.value,
+        last_error=None,
+        last_policy_error=None,
+        last_checked_at=utc_now(),
+    )
 
     verified_bundle = verify_bundle(bundle_path, public_key, bundle_dir)
     manifest = verified_bundle.envelope.manifest
+    policy_result = evaluate_manifest_policy(
+        manifest,
+        device_model=device_state["device_model"],
+        agent_version=device_state["agent_version"],
+        active_version=device_state["active_version"],
+    )
 
-    state_store.update(candidate_version=manifest.version, device_model=manifest.device_model)
+    if not policy_result.allowed:
+        state_store.update(
+            update_state=UpdateState.failed.value,
+            candidate_version=manifest.version,
+            last_policy_error=policy_result.reason,
+            last_checked_at=utc_now(),
+        )
+        record_event(
+            release_layout,
+            "policy_rejected",
+            version=manifest.version,
+            error=policy_result.reason,
+        )
+        return state_store.load()
+
+    state_store.update(candidate_version=manifest.version)
     record_event(release_layout, "verified", version=manifest.version)
 
     state_store.update(
@@ -248,13 +276,22 @@ def install_bundle_flow(
     return state_store.load()
 
 
-def save_discovered_candidates(candidates: list[DiscoveryCandidate]) -> list[dict[str, str | None]]:
+def policy_context() -> dict[str, str | None]:
+    payload = STATE_STORE.load()
+    return {
+        "device_model": payload["device_model"],
+        "agent_version": payload["agent_version"],
+        "active_version": payload["active_version"],
+    }
+
+
+def save_discovered_candidates(candidates: list[DiscoveryCandidate]) -> list[dict[str, object]]:
     payload = [candidate.as_dict() for candidate in candidates]
     STATE_STORE.update(discovered_bundles=payload, update_state=UpdateState.idle.value, last_checked_at=utc_now())
     return payload
 
 
-def discovered_candidates() -> list[dict[str, str | None]]:
+def discovered_candidates() -> list[dict[str, object]]:
     return STATE_STORE.load().get("discovered_bundles", [])
 
 
@@ -312,7 +349,7 @@ def discover_usb(
     mount_root: Path = Path("/media"),
 ) -> None:
     STATE_STORE.update(update_state=UpdateState.discovering.value, last_error=None, last_checked_at=utc_now())
-    candidates = discover_usb_candidates(mount_root)
+    candidates = discover_usb_candidates(mount_root, policy_context=policy_context())
     payload = save_discovered_candidates(candidates)
     typer.echo(json.dumps(payload, indent=2))
 
@@ -322,7 +359,7 @@ def discover_http(
     base_url: str,
 ) -> None:
     STATE_STORE.update(update_state=UpdateState.discovering.value, last_error=None, last_checked_at=utc_now())
-    candidate = download_http_bundle(base_url)
+    candidate = download_http_bundle(base_url, policy_context=policy_context())
     payload = save_discovered_candidates([candidate])
     typer.echo(json.dumps(payload, indent=2))
 
@@ -345,6 +382,9 @@ def install_discovered(
         raise typer.BadParameter(f"discovery index out of range: {index}")
 
     candidate = candidates[index]
+    compatible = candidate.get("compatible")
+    if compatible is False:
+        raise typer.BadParameter(f"discovered bundle is incompatible: {candidate.get('policy_reason')}")
     public_key = candidate.get("public_key_path")
     if not public_key:
         raise typer.BadParameter("discovered bundle is missing a public key path")

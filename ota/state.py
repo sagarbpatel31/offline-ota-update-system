@@ -19,11 +19,13 @@ class DeviceStateStore:
         return {
             "device_id": "rpi-demo-001",
             "device_model": "raspberry-pi-4",
+            "agent_version": "0.1.0",
             "update_state": "idle",
             "active_version": None,
             "candidate_version": None,
             "previous_version": None,
             "discovered_bundles": [],
+            "last_policy_error": None,
             "last_error": None,
             "last_checked_at": None,
             "last_updated_at": None,

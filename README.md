@@ -83,6 +83,8 @@ python -m agent.main list-discovered
 python -m agent.main install-discovered --index 0 --activate-command "systemctl restart offline-ota-demo.service"
 ```
 
+Discovered candidates include compatibility flags and policy reasons. Incompatible bundles are rejected before staging.
+
 ### Inspect device status and update history
 
 ```bash
@@ -122,12 +124,13 @@ This repository is scaffolded for MVP implementation. The current code provides:
 - health-check-driven install flow with JSON state tracking
 - Raspberry Pi demo service with release-aware metadata
 - USB and local HTTP bundle discovery with cached candidates
+- device-model, minimum-agent-version, and anti-downgrade policy checks
 - starter FastAPI dashboard
 - starter agent CLI
 - systemd service skeleton
 
 ## Next Milestones
 
-- Enforce device/version policy during install
 - Add update audit log and dashboard views
 - Add Raspberry Pi USB mount automation and service integration
+- Add latest-compatible bundle selection and rollout policy
