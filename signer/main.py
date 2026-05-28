@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import typer
@@ -96,6 +97,25 @@ def sign_bundle(
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(envelope.model_dump_json(indent=2) + "\n")
+    typer.echo(f"wrote {output}")
+
+
+@app.command()
+def build_bundle_index(
+    manifest_path: Path,
+    output: Path = Path("bundle-index.json"),
+    release_notes: str = "Local OTA update bundle",
+) -> None:
+    manifest = BundleManifest.model_validate_json(manifest_path.read_text())
+    payload = {
+        "version": manifest.version,
+        "device_model": manifest.device_model,
+        "minimum_agent_version": manifest.minimum_agent_version,
+        "release_notes": release_notes,
+        "artifacts": [artifact.path for artifact in manifest.artifacts],
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, indent=2) + "\n")
     typer.echo(f"wrote {output}")
 
 

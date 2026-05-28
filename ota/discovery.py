@@ -8,7 +8,7 @@ from urllib.parse import urljoin
 from urllib.request import urlopen
 
 from ota.bundle import SignedManifestEnvelope, load_signed_manifest
-from ota.policy import PolicyResult, evaluate_manifest_policy
+from ota.policy import PolicyResult, evaluate_manifest_policy, parse_version
 
 
 @dataclass
@@ -22,6 +22,7 @@ class DiscoveryCandidate:
     device_model: str
     compatible: bool = True
     policy_reason: str | None = None
+    release_notes: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -34,6 +35,7 @@ class DiscoveryCandidate:
             "device_model": self.device_model,
             "compatible": self.compatible,
             "policy_reason": self.policy_reason,
+            "release_notes": self.release_notes,
         }
 
 
@@ -43,6 +45,12 @@ def discovery_root() -> Path:
 
 def discovery_cache_dir(name: str) -> Path:
     return discovery_root() / name
+
+
+def parse_bundle_index(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text())
 
 
 def load_candidate(
@@ -55,6 +63,7 @@ def load_candidate(
 ) -> DiscoveryCandidate:
     envelope = load_signed_manifest(bundle_path)
     manifest = envelope.manifest
+    bundle_index = parse_bundle_index(bundle_path.parent / "bundle-index.json")
     return DiscoveryCandidate(
         source=source,
         source_type=source_type,
@@ -65,6 +74,7 @@ def load_candidate(
         device_model=manifest.device_model,
         compatible=policy_result.allowed if policy_result else True,
         policy_reason=policy_result.reason if policy_result else None,
+        release_notes=bundle_index.get("release_notes"),
     )
 
 
@@ -156,3 +166,21 @@ def download_http_bundle(
         public_key_path=public_key if public_key.exists() else None,
         policy_result=policy_result,
     )
+
+
+def select_latest_compatible(candidates: list[dict[str, object]]) -> tuple[int, dict[str, object]] | None:
+    compatible_candidates = [
+        (index, candidate) for index, candidate in enumerate(candidates) if candidate.get("compatible") is True
+    ]
+    if not compatible_candidates:
+        return None
+
+    compatible_candidates.sort(
+        key=lambda item: (
+            parse_version(str(item[1]["version"])),
+            1 if item[1].get("source_type") == "http" else 0,
+            str(item[1].get("source")),
+        ),
+        reverse=True,
+    )
+    return compatible_candidates[0]

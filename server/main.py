@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI
 
 from demo_service.app import service_metadata
+from ota.discovery import select_latest_compatible
 from ota.release import ReleaseLayout, active_version
 from ota.state import DeviceStateStore
 
@@ -43,3 +44,12 @@ def service() -> dict[str, object]:
 @app.get("/api/discovered")
 def discovered() -> list[dict[str, object]]:
     return STATE_STORE.load().get("discovered_bundles", [])
+
+
+@app.get("/api/discovered/latest")
+def discovered_latest() -> dict[str, object] | None:
+    selection = select_latest_compatible(STATE_STORE.load().get("discovered_bundles", []))
+    if not selection:
+        return None
+    index, candidate = selection
+    return {"index": index, "candidate": candidate}

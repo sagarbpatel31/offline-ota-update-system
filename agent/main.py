@@ -11,7 +11,7 @@ import typer
 
 from ota.bundle import BundleManifest, VerifiedBundle, load_signed_manifest, sha256_file
 from ota.crypto import verify_manifest_signature
-from ota.discovery import DiscoveryCandidate, discover_usb_candidates, download_http_bundle
+from ota.discovery import DiscoveryCandidate, discover_usb_candidates, download_http_bundle, select_latest_compatible
 from ota.policy import evaluate_manifest_policy
 from ota.release import (
     ReleaseLayout,
@@ -295,6 +295,14 @@ def discovered_candidates() -> list[dict[str, object]]:
     return STATE_STORE.load().get("discovered_bundles", [])
 
 
+def selected_candidate_payload() -> dict[str, object] | None:
+    selection = select_latest_compatible(discovered_candidates())
+    if not selection:
+        return None
+    index, candidate = selection
+    return {"index": index, "candidate": candidate}
+
+
 @app.command()
 def verify(
     bundle_path: Path = Path("manifests/signed-bundle.json"),
@@ -369,6 +377,12 @@ def list_discovered() -> None:
     typer.echo(json.dumps(discovered_candidates(), indent=2))
 
 
+@app.command("select-latest")
+def select_latest() -> None:
+    payload = selected_candidate_payload()
+    typer.echo(json.dumps(payload, indent=2))
+
+
 @app.command("install-discovered")
 def install_discovered(
     index: int = 0,
@@ -397,6 +411,28 @@ def install_discovered(
         activate_command=activate_command,
     )
     typer.echo(json.dumps(payload, indent=2))
+
+
+@app.command("install-latest")
+def install_latest(
+    root: Path = LAYOUT.root,
+    activate_command: str | None = DEFAULT_ACTIVATE_COMMAND,
+) -> None:
+    payload = selected_candidate_payload()
+    if not payload:
+        raise typer.BadParameter("no compatible discovered bundles available")
+    candidate = payload["candidate"]
+    public_key = candidate.get("public_key_path")
+    if not public_key:
+        raise typer.BadParameter("selected bundle is missing a public key path")
+    install_payload = install_bundle_flow(
+        bundle_path=Path(candidate["bundle_path"]),
+        public_key=Path(public_key),
+        bundle_dir=Path(candidate["bundle_dir"]),
+        root=root,
+        activate_command=activate_command,
+    )
+    typer.echo(json.dumps({"selected_index": payload["index"], "result": install_payload}, indent=2))
 
 
 @app.command()

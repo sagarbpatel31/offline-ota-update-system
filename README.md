@@ -58,6 +58,7 @@ python -m signer.main generate-keys
 ```bash
 python -m demo_service.build_release 1.1.0
 python -m signer.main build-manifest artifacts/bundle 1.1.0
+python -m signer.main build-bundle-index manifests/bundle.manifest.json --output bundle-index.json --release-notes "Improved diagnostics"
 python -m signer.main sign-bundle manifests/bundle.manifest.json
 ```
 
@@ -80,7 +81,9 @@ python -m agent.main install --activate-command "systemctl restart offline-ota-d
 python -m agent.main discover-usb --mount-root /media
 python -m agent.main discover-http http://192.168.1.50:8081/
 python -m agent.main list-discovered
+python -m agent.main select-latest
 python -m agent.main install-discovered --index 0 --activate-command "systemctl restart offline-ota-demo.service"
+python -m agent.main install-latest --activate-command "systemctl restart offline-ota-demo.service"
 ```
 
 Discovered candidates include compatibility flags and policy reasons. Incompatible bundles are rejected before staging.
@@ -93,6 +96,7 @@ curl http://127.0.0.1:8000/api/status
 curl http://127.0.0.1:8000/api/history
 curl http://127.0.0.1:8000/api/service
 curl http://127.0.0.1:8000/api/discovered
+curl http://127.0.0.1:8000/api/discovered/latest
 ```
 
 ### Run the local dashboard
@@ -125,6 +129,7 @@ This repository is scaffolded for MVP implementation. The current code provides:
 - Raspberry Pi demo service with release-aware metadata
 - USB and local HTTP bundle discovery with cached candidates
 - device-model, minimum-agent-version, and anti-downgrade policy checks
+- latest-compatible bundle selection with optional release notes metadata
 - starter FastAPI dashboard
 - starter agent CLI
 - systemd service skeleton
@@ -133,4 +138,4 @@ This repository is scaffolded for MVP implementation. The current code provides:
 
 - Add update audit log and dashboard views
 - Add Raspberry Pi USB mount automation and service integration
-- Add latest-compatible bundle selection and rollout policy
+- Add rollout policy and background polling
