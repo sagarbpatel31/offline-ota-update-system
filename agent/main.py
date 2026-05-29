@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -14,7 +15,7 @@ import typer
 from ota.bundle import BundleManifest, VerifiedBundle, load_signed_manifest, sha256_file
 from ota.crypto import verify_manifest_signature
 from ota.discovery import DiscoveryCandidate, discover_usb_candidates, download_http_bundle, select_latest_compatible
-from ota.policy import evaluate_manifest_policy, within_maintenance_window
+from ota.policy import cooldown_active, evaluate_manifest_policy, within_maintenance_window
 from ota.release import (
     ReleaseLayout,
     active_version,
@@ -23,6 +24,7 @@ from ota.release import (
     find_attempt,
     previous_version,
     promote_release,
+    prune_old_releases,
     read_history,
     rollback_release,
     stage_release,
@@ -58,6 +60,10 @@ DEFAULT_POLL_INTERVAL_SECONDS = int(os.getenv("OFFLINE_OTA_POLL_INTERVAL_SECONDS
 DEFAULT_ROLLOUT_RING = os.getenv("OFFLINE_OTA_ROLLOUT_RING", "general")
 DEFAULT_MAINTENANCE_WINDOW_START = os.getenv("OFFLINE_OTA_MAINTENANCE_WINDOW_START")
 DEFAULT_MAINTENANCE_WINDOW_END = os.getenv("OFFLINE_OTA_MAINTENANCE_WINDOW_END")
+DEFAULT_TRUSTED_HTTP_SOURCES = [value for value in os.getenv("OFFLINE_OTA_TRUSTED_HTTP_SOURCES", "").split(",") if value]
+DEFAULT_TRUSTED_USB_ROOTS = [value for value in os.getenv("OFFLINE_OTA_TRUSTED_USB_ROOTS", "").split(",") if value]
+DEFAULT_RETRY_COOLDOWN_MINUTES = int(os.getenv("OFFLINE_OTA_RETRY_COOLDOWN_MINUTES", "30"))
+DEFAULT_RETENTION_KEEP_RELEASES = int(os.getenv("OFFLINE_OTA_RETENTION_KEEP_RELEASES", "3"))
 
 
 def read_state() -> str:
@@ -247,6 +253,9 @@ def install_bundle_flow(
             last_checked_at=utc_now(),
         )
         record_event(release_layout, "health_check_passed", version=manifest.version)
+        failed_versions = state_store.load().get("failed_versions", {})
+        failed_versions.pop(manifest.version, None)
+        state_store.update(failed_versions=failed_versions)
         return state_store.load()
 
     state_store.update(update_state=UpdateState.rollback.value, last_error=error, last_checked_at=utc_now())
@@ -268,6 +277,9 @@ def install_bundle_flow(
             version=manifest.version,
             error=error,
         )
+        failed_versions = state_store.load().get("failed_versions", {})
+        failed_versions[manifest.version] = utc_now()
+        state_store.update(failed_versions=failed_versions)
         return state_store.load()
 
     rolled_back_version = rollback_release(release_layout)
@@ -286,6 +298,9 @@ def install_bundle_flow(
         restored_version=rolled_back_version,
         error=error,
     )
+    failed_versions = state_store.load().get("failed_versions", {})
+    failed_versions[manifest.version] = utc_now()
+    state_store.update(failed_versions=failed_versions)
     return state_store.load()
 
 
@@ -344,6 +359,9 @@ def discover_from_sources(
                     approved_updates=approved_updates(),
                     maintenance_window_start=cast(str | None, state.get("maintenance_window_start")),
                     maintenance_window_end=cast(str | None, state.get("maintenance_window_end")),
+                    trusted_sources=cast(list[str], state.get("trusted_usb_roots", [])),
+                    failed_versions=cast(dict[str, str], state.get("failed_versions", {})),
+                    retry_cooldown_minutes=int(state.get("retry_cooldown_minutes", DEFAULT_RETRY_COOLDOWN_MINUTES)),
                 )
             )
 
@@ -359,6 +377,9 @@ def discover_from_sources(
                     approved_updates=approved_updates(),
                     maintenance_window_start=cast(str | None, state.get("maintenance_window_start")),
                     maintenance_window_end=cast(str | None, state.get("maintenance_window_end")),
+                    trusted_sources=cast(list[str], state.get("trusted_http_sources", [])),
+                    failed_versions=cast(dict[str, str], state.get("failed_versions", {})),
+                    retry_cooldown_minutes=int(state.get("retry_cooldown_minutes", DEFAULT_RETRY_COOLDOWN_MINUTES)),
                 )
             )
         except Exception as error:
@@ -373,6 +394,10 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
     approvals = approved_updates()
     allowed_channels = {"stable"} if state["rollout_channel"] == "stable" else {"stable", "canary"}
     allowed_rings = {"general"} if state["rollout_ring"] == "general" else {"general", state["rollout_ring"]}
+    trusted_http_sources = cast(list[str], state.get("trusted_http_sources", []))
+    trusted_usb_roots = cast(list[str], state.get("trusted_usb_roots", []))
+    failed_versions = cast(dict[str, str], state.get("failed_versions", {}))
+    retry_cooldown_minutes = int(state.get("retry_cooldown_minutes", DEFAULT_RETRY_COOLDOWN_MINUTES))
     for candidate in discovered_candidates():
         refreshed_candidate = DiscoveryCandidate(
             source=str(candidate["source"]),
@@ -403,6 +428,16 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
             refreshed_candidate.selection_reason = (
                 f"ring {refreshed_candidate.ring} is not allowed for rollout ring {state['rollout_ring']}"
             )
+        elif refreshed_candidate.source_type == "http" and trusted_http_sources and not any(
+            str(refreshed_candidate.source).startswith(prefix) for prefix in trusted_http_sources
+        ):
+            refreshed_candidate.selectable = False
+            refreshed_candidate.selection_reason = "source is not trusted"
+        elif refreshed_candidate.source_type == "usb" and trusted_usb_roots and not any(
+            str(refreshed_candidate.source).startswith(prefix) for prefix in trusted_usb_roots
+        ):
+            refreshed_candidate.selectable = False
+            refreshed_candidate.selection_reason = "source is not trusted"
         elif not within_maintenance_window(
             now=datetime.now(),
             window_start=cast(str | None, state.get("maintenance_window_start")),
@@ -410,6 +445,14 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
         ):
             refreshed_candidate.selectable = False
             refreshed_candidate.selection_reason = "outside maintenance window"
+        elif cooldown_active(
+            version=refreshed_candidate.version,
+            failed_versions=failed_versions,
+            cooldown_minutes=retry_cooldown_minutes,
+            now=datetime.now(),
+        ):
+            refreshed_candidate.selectable = False
+            refreshed_candidate.selection_reason = "retry cooldown active"
         elif refreshed_candidate.approval_required and not refreshed_candidate.approved:
             refreshed_candidate.selectable = False
             refreshed_candidate.selection_reason = "manual approval required"
@@ -442,6 +485,10 @@ def init_layout(root: Path = LAYOUT.root) -> None:
     payload["rollout_ring"] = payload.get("rollout_ring") or DEFAULT_ROLLOUT_RING
     payload["maintenance_window_start"] = payload.get("maintenance_window_start") or DEFAULT_MAINTENANCE_WINDOW_START
     payload["maintenance_window_end"] = payload.get("maintenance_window_end") or DEFAULT_MAINTENANCE_WINDOW_END
+    payload["trusted_http_sources"] = payload.get("trusted_http_sources") or DEFAULT_TRUSTED_HTTP_SOURCES
+    payload["trusted_usb_roots"] = payload.get("trusted_usb_roots") or DEFAULT_TRUSTED_USB_ROOTS
+    payload["retry_cooldown_minutes"] = payload.get("retry_cooldown_minutes") or DEFAULT_RETRY_COOLDOWN_MINUTES
+    payload["retention_keep_releases"] = payload.get("retention_keep_releases") or DEFAULT_RETENTION_KEEP_RELEASES
     STATE_STORE.save(payload)
     typer.echo(f"initialized release layout at {root}")
 
@@ -541,6 +588,50 @@ def set_maintenance_window(start: str, end: str) -> None:
             indent=2,
         )
     )
+
+
+@app.command("set-trusted-http-sources")
+def set_trusted_http_sources(sources: list[str]) -> None:
+    STATE_STORE.update(trusted_http_sources=sources)
+    record_event(LAYOUT, "trusted_http_sources_changed", version=",".join(sources) or "none")
+    typer.echo(json.dumps({"trusted_http_sources": sources, "discovered": refresh_cached_candidate_flags()}, indent=2))
+
+
+@app.command("set-trusted-usb-roots")
+def set_trusted_usb_roots(roots: list[str]) -> None:
+    STATE_STORE.update(trusted_usb_roots=roots)
+    record_event(LAYOUT, "trusted_usb_roots_changed", version=",".join(roots) or "none")
+    typer.echo(json.dumps({"trusted_usb_roots": roots, "discovered": refresh_cached_candidate_flags()}, indent=2))
+
+
+@app.command("set-retry-cooldown")
+def set_retry_cooldown(minutes: int) -> None:
+    STATE_STORE.update(retry_cooldown_minutes=minutes)
+    record_event(LAYOUT, "retry_cooldown_changed", version=str(minutes))
+    typer.echo(json.dumps({"retry_cooldown_minutes": minutes, "discovered": refresh_cached_candidate_flags()}, indent=2))
+
+
+@app.command("set-retention")
+def set_retention(keep_releases: int) -> None:
+    STATE_STORE.update(retention_keep_releases=keep_releases)
+    record_event(LAYOUT, "retention_changed", version=str(keep_releases))
+    typer.echo(json.dumps({"retention_keep_releases": keep_releases}, indent=2))
+
+
+@app.command("cleanup")
+def cleanup(root: Path = LAYOUT.root) -> None:
+    state = STATE_STORE.load()
+    removed_releases = prune_old_releases(ReleaseLayout(root), int(state.get("retention_keep_releases", DEFAULT_RETENTION_KEEP_RELEASES)))
+    discovery_root = Path("artifacts/discovery")
+    removed_discovery: list[str] = []
+    if discovery_root.exists():
+        candidates = {str(Path(candidate["bundle_path"]).resolve().parent) for candidate in discovered_candidates()}
+        for cache_dir in discovery_root.iterdir():
+            if cache_dir.is_dir() and str(cache_dir.resolve()) not in candidates:
+                shutil.rmtree(cache_dir, ignore_errors=True)
+                removed_discovery.append(cache_dir.name)
+    record_event(LAYOUT, "cleanup_ran", version="cleanup")
+    typer.echo(json.dumps({"removed_releases": removed_releases, "removed_discovery": removed_discovery}, indent=2))
 
 
 @app.command("list-approvals")

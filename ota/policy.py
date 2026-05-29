@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from ota.bundle import BundleManifest
 
@@ -51,6 +51,30 @@ def within_maintenance_window(
     if start_minutes <= end_minutes:
         return start_minutes <= current_minutes <= end_minutes
     return current_minutes >= start_minutes or current_minutes <= end_minutes
+
+
+def source_is_trusted(source: str, *, trusted_sources: list[str]) -> bool:
+    if not trusted_sources:
+        return True
+    return any(source.startswith(prefix) for prefix in trusted_sources)
+
+
+def cooldown_active(
+    *,
+    version: str,
+    failed_versions: dict[str, str],
+    cooldown_minutes: int,
+    now: datetime,
+) -> bool:
+    failed_at = failed_versions.get(version)
+    if not failed_at:
+        return False
+    try:
+        timestamp = datetime.fromisoformat(failed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    comparison_now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    return comparison_now < timestamp + timedelta(minutes=cooldown_minutes)
 
 
 def evaluate_manifest_policy(

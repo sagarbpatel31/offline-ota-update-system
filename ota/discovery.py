@@ -9,7 +9,14 @@ from urllib.parse import urljoin
 from urllib.request import urlopen
 
 from ota.bundle import SignedManifestEnvelope, load_signed_manifest
-from ota.policy import PolicyResult, evaluate_manifest_policy, parse_version, within_maintenance_window
+from ota.policy import (
+    PolicyResult,
+    cooldown_active,
+    evaluate_manifest_policy,
+    parse_version,
+    source_is_trusted,
+    within_maintenance_window,
+)
 
 
 @dataclass
@@ -80,6 +87,9 @@ def load_candidate(
     approved_updates: set[str] | None = None,
     maintenance_window_start: str | None = None,
     maintenance_window_end: str | None = None,
+    trusted_sources: list[str] | None = None,
+    failed_versions: dict[str, str] | None = None,
+    retry_cooldown_minutes: int = 30,
 ) -> DiscoveryCandidate:
     envelope = load_signed_manifest(bundle_path)
     manifest = envelope.manifest
@@ -100,6 +110,9 @@ def load_candidate(
     elif ring not in allowed_rings:
         selectable = False
         selection_reason = f"ring {ring} is not allowed for rollout ring {rollout_ring}"
+    elif not source_is_trusted(source, trusted_sources=trusted_sources or []):
+        selectable = False
+        selection_reason = "source is not trusted"
     elif not within_maintenance_window(
         now=datetime.now(),
         window_start=maintenance_window_start,
@@ -107,6 +120,14 @@ def load_candidate(
     ):
         selectable = False
         selection_reason = "outside maintenance window"
+    elif cooldown_active(
+        version=manifest.version,
+        failed_versions=failed_versions or {},
+        cooldown_minutes=retry_cooldown_minutes,
+        now=datetime.now(),
+    ):
+        selectable = False
+        selection_reason = "retry cooldown active"
     elif policy_result and not policy_result.allowed:
         selectable = False
         selection_reason = policy_result.reason
@@ -143,6 +164,9 @@ def discover_usb_candidates(
     approved_updates: set[str] | None = None,
     maintenance_window_start: str | None = None,
     maintenance_window_end: str | None = None,
+    trusted_sources: list[str] | None = None,
+    failed_versions: dict[str, str] | None = None,
+    retry_cooldown_minutes: int = 30,
 ) -> list[DiscoveryCandidate]:
     candidates: list[DiscoveryCandidate] = []
     for bundle_path in sorted(mount_root.rglob("signed-bundle.json")):
@@ -170,6 +194,9 @@ def discover_usb_candidates(
                 approved_updates=approved_updates,
                 maintenance_window_start=maintenance_window_start,
                 maintenance_window_end=maintenance_window_end,
+                trusted_sources=trusted_sources,
+                failed_versions=failed_versions,
+                retry_cooldown_minutes=retry_cooldown_minutes,
             )
         )
     return candidates
@@ -185,6 +212,9 @@ def download_http_bundle(
     approved_updates: set[str] | None = None,
     maintenance_window_start: str | None = None,
     maintenance_window_end: str | None = None,
+    trusted_sources: list[str] | None = None,
+    failed_versions: dict[str, str] | None = None,
+    retry_cooldown_minutes: int = 30,
 ) -> DiscoveryCandidate:
     cache_dir = discovery_cache_dir(cache_name)
     if cache_dir.exists():
@@ -241,6 +271,9 @@ def download_http_bundle(
         approved_updates=approved_updates,
         maintenance_window_start=maintenance_window_start,
         maintenance_window_end=maintenance_window_end,
+        trusted_sources=trusted_sources,
+        failed_versions=failed_versions,
+        retry_cooldown_minutes=retry_cooldown_minutes,
     )
 
 

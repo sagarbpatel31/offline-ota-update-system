@@ -83,6 +83,10 @@ python -m agent.main discover-http http://192.168.1.50:8081/
 python -m agent.main set-rollout-channel stable
 python -m agent.main set-rollout-ring general
 python -m agent.main set-maintenance-window 01:00 05:00
+python -m agent.main set-trusted-http-sources http://192.168.1.50:8081/
+python -m agent.main set-trusted-usb-roots /media /mnt
+python -m agent.main set-retry-cooldown 30
+python -m agent.main set-retention 3
 python -m agent.main list-discovered
 python -m agent.main select-latest
 python -m agent.main approve-discovered 0
@@ -106,6 +110,7 @@ python -m agent.main poll-loop --interval-seconds 60
 python -m agent.main device-status
 python -m agent.main audit-summary
 python -m agent.main audit-attempt ATTEMPT_ID
+python -m agent.main cleanup
 curl http://127.0.0.1:8000/api/status
 curl http://127.0.0.1:8000/api/policy
 curl http://127.0.0.1:8000/api/history

@@ -102,6 +102,26 @@ def append_history(layout: ReleaseLayout, event: dict[str, Any]) -> None:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
 
 
+def prune_old_releases(layout: ReleaseLayout, keep: int) -> list[str]:
+    layout.ensure()
+    release_dirs = sorted(
+        [path for path in layout.releases_dir.iterdir() if path.is_dir()],
+        key=lambda path: path.name,
+        reverse=True,
+    )
+    active = active_version(layout)
+    kept = set(filter(None, [active, previous_version(layout)]))
+    removed: list[str] = []
+    preserved = 0
+    for release_dir in release_dirs:
+        if release_dir.name in kept or preserved < keep:
+            preserved += 1
+            continue
+        shutil.rmtree(release_dir)
+        removed.append(release_dir.name)
+    return removed
+
+
 def read_history(layout: ReleaseLayout) -> list[dict[str, Any]]:
     if not layout.history_file.exists():
         return []

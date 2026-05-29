@@ -45,6 +45,11 @@ def policy_state() -> dict[str, object]:
         "rollout_ring": payload["rollout_ring"],
         "maintenance_window_start": payload["maintenance_window_start"],
         "maintenance_window_end": payload["maintenance_window_end"],
+        "trusted_http_sources": payload["trusted_http_sources"],
+        "trusted_usb_roots": payload["trusted_usb_roots"],
+        "retry_cooldown_minutes": payload["retry_cooldown_minutes"],
+        "retention_keep_releases": payload["retention_keep_releases"],
+        "failed_versions": payload["failed_versions"],
         "approved_updates": payload["approved_updates"],
     }
 

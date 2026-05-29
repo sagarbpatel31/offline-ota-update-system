@@ -1,8 +1,11 @@
 import unittest
 from datetime import datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from ota.discovery import select_latest_compatible
-from ota.policy import within_maintenance_window
+from ota.policy import cooldown_active, source_is_trusted, within_maintenance_window
+from ota.release import ReleaseLayout, prune_old_releases
 
 
 class RolloutPolicyTests(unittest.TestCase):
@@ -94,6 +97,41 @@ class RolloutPolicyTests(unittest.TestCase):
                 window_end="02:00",
             )
         )
+
+    def test_source_is_trusted(self) -> None:
+        self.assertTrue(source_is_trusted("http://trusted.local/update", trusted_sources=["http://trusted.local"]))
+        self.assertFalse(source_is_trusted("http://evil.local/update", trusted_sources=["http://trusted.local"]))
+
+    def test_cooldown_active(self) -> None:
+        self.assertTrue(
+            cooldown_active(
+                version="1.0.0",
+                failed_versions={"1.0.0": "2026-01-01T00:00:00+00:00"},
+                cooldown_minutes=30,
+                now=datetime(2026, 1, 1, 0, 10),
+            )
+        )
+        self.assertFalse(
+            cooldown_active(
+                version="1.0.0",
+                failed_versions={"1.0.0": "2026-01-01T00:00:00+00:00"},
+                cooldown_minutes=30,
+                now=datetime(2026, 1, 1, 1, 0),
+            )
+        )
+
+    def test_prune_old_releases_keeps_active_previous_and_limit(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            layout = ReleaseLayout(Path(tmpdir))
+            layout.ensure()
+            for version in ["1.0.0", "1.1.0", "1.2.0", "1.3.0"]:
+                layout.release_dir(version).mkdir(parents=True, exist_ok=True)
+            layout.active_link.symlink_to(layout.release_dir("1.3.0"))
+            layout.previous_version_file.write_text("1.2.0\n")
+            removed = prune_old_releases(layout, keep=1)
+            self.assertIn("1.0.0", removed)
+            self.assertNotIn("1.3.0", removed)
+            self.assertNotIn("1.2.0", removed)
 
 
 if __name__ == "__main__":
