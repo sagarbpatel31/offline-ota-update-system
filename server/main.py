@@ -112,6 +112,7 @@ def policy_state() -> dict[str, object]:
         "source_quarantine_threshold": payload["source_quarantine_threshold"],
         "source_quarantine_minutes": payload["source_quarantine_minutes"],
         "source_event_history_limit": payload["source_event_history_limit"],
+        "source_policies": payload["source_policies"],
         "failure_counts": payload["failure_counts"],
         "source_health": payload["source_health"],
         "retention_keep_releases": payload["retention_keep_releases"],

@@ -14,6 +14,7 @@ from ota.policy import (
     cooldown_active,
     evaluate_manifest_policy,
     parse_version,
+    resolve_source_policy,
     source_is_trusted,
     within_maintenance_window,
 )
@@ -40,6 +41,7 @@ class DiscoveryCandidate:
     selection_reason: str | None = None
     source_score: int = 100
     source_reputation: int = 50
+    source_policy: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -62,6 +64,7 @@ class DiscoveryCandidate:
             "selection_reason": self.selection_reason,
             "source_score": self.source_score,
             "source_reputation": self.source_reputation,
+            "source_policy": self.source_policy or {},
         }
 
 
@@ -96,13 +99,15 @@ def load_candidate(
     failure_counts: dict[str, int] | None = None,
     retry_cooldown_minutes: int = 30,
     source_health: dict[str, dict[str, object]] | None = None,
+    source_policies: dict[str, dict[str, object]] | None = None,
 ) -> DiscoveryCandidate:
     envelope = load_signed_manifest(bundle_path)
     manifest = envelope.manifest
     bundle_index = parse_bundle_index(bundle_path.parent / "bundle-index.json")
     channel = str(bundle_index.get("channel", "stable"))
     ring = str(bundle_index.get("ring", "general"))
-    priority = int(bundle_index.get("priority", 0))
+    source_policy = resolve_source_policy(source, source_policies)
+    priority = int(source_policy.get("priority_override", bundle_index.get("priority", 0)))
     approval_required = bool(bundle_index.get("requires_approval", False))
     approval_key = f"{source}|{manifest.version}"
     approved = (not approval_required) or (approved_updates is not None and approval_key in approved_updates)
@@ -124,8 +129,8 @@ def load_candidate(
         selection_reason = "source is not trusted"
     elif not within_maintenance_window(
         now=datetime.now(),
-        window_start=maintenance_window_start,
-        window_end=maintenance_window_end,
+        window_start=str(source_policy.get("maintenance_window_start", maintenance_window_start) or "") or None,
+        window_end=str(source_policy.get("maintenance_window_end", maintenance_window_end) or "") or None,
     ):
         selectable = False
         selection_reason = "outside maintenance window"
@@ -163,6 +168,7 @@ def load_candidate(
         selection_reason=selection_reason,
         source_score=source_score,
         source_reputation=source_reputation,
+        source_policy=source_policy,
     )
 
 
@@ -180,6 +186,7 @@ def discover_usb_candidates(
     failure_counts: dict[str, int] | None = None,
     retry_cooldown_minutes: int = 30,
     source_health: dict[str, dict[str, object]] | None = None,
+    source_policies: dict[str, dict[str, object]] | None = None,
 ) -> list[DiscoveryCandidate]:
     candidates: list[DiscoveryCandidate] = []
     for bundle_path in sorted(mount_root.rglob("signed-bundle.json")):
@@ -212,6 +219,7 @@ def discover_usb_candidates(
                 failure_counts=failure_counts,
                 retry_cooldown_minutes=retry_cooldown_minutes,
                 source_health=source_health,
+                source_policies=source_policies,
             )
         )
     return candidates
@@ -232,6 +240,7 @@ def download_http_bundle(
     failure_counts: dict[str, int] | None = None,
     retry_cooldown_minutes: int = 30,
     source_health: dict[str, dict[str, object]] | None = None,
+    source_policies: dict[str, dict[str, object]] | None = None,
 ) -> DiscoveryCandidate:
     cache_dir = discovery_cache_dir(cache_name)
     if cache_dir.exists():
@@ -293,6 +302,7 @@ def download_http_bundle(
         failure_counts=failure_counts,
         retry_cooldown_minutes=retry_cooldown_minutes,
         source_health=source_health,
+        source_policies=source_policies,
     )
 
 

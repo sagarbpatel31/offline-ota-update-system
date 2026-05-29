@@ -20,6 +20,8 @@ from ota.policy import (
     adaptive_source_backoff_minutes,
     cooldown_active,
     evaluate_manifest_policy,
+    poll_interval_active,
+    resolve_source_policy,
     source_block_reason,
     within_maintenance_window,
 )
@@ -407,6 +409,7 @@ def record_source_success(source: str) -> None:
     current["backoff_until"] = None
     current["quarantined_until"] = None
     current["reputation"] = calculate_source_reputation(source, events)
+    current["last_attempted_at"] = utc_now()
     current["last_seen_at"] = utc_now()
     health[source] = current
     STATE_STORE.update(source_health=health)
@@ -421,6 +424,7 @@ def record_source_failure(source: str, error: str) -> None:
     current["failures"] = int(current.get("failures", 0)) + 1
     current["consecutive_failures"] = int(current.get("consecutive_failures", 0)) + 1
     current["last_error"] = error
+    current["last_attempted_at"] = utc_now()
     current["last_seen_at"] = utc_now()
     backoff_minutes = adaptive_source_backoff_minutes(
         base_minutes=int(state.get("source_backoff_base_minutes", DEFAULT_SOURCE_BACKOFF_BASE_MINUTES)),
@@ -452,7 +456,21 @@ def record_source_skip(source: str, reason: str) -> None:
 
 
 def blocked_http_source_reason(source: str) -> str | None:
-    return source_block_reason(source_health().get(source), now=datetime.now(timezone.utc))
+    state = STATE_STORE.load()
+    entry = source_health().get(source)
+    blocked_reason = source_block_reason(entry, now=datetime.now(timezone.utc))
+    if blocked_reason:
+        return blocked_reason
+    source_policy = resolve_source_policy(source, cast(dict[str, dict[str, object]], state.get("source_policies", {})))
+    poll_interval_minutes = int(source_policy.get("poll_interval_minutes", 0))
+    last_attempted_at = cast(dict[str, object], entry or {}).get("last_attempted_at")
+    if poll_interval_active(
+        last_attempted_at=str(last_attempted_at) if last_attempted_at else None,
+        poll_interval_minutes=poll_interval_minutes,
+        now=datetime.now(timezone.utc),
+    ):
+        return "source poll interval active"
+    return None
 
 
 def cooldown_minutes_for_state(state: dict[str, object], version: str) -> int:
@@ -506,6 +524,7 @@ def discover_from_sources(
                     failure_counts=cast(dict[str, int], state.get("failure_counts", {})),
                     retry_cooldown_minutes=int(state.get("retry_cooldown_minutes", DEFAULT_RETRY_COOLDOWN_MINUTES)),
                     source_health=source_health(),
+                    source_policies=cast(dict[str, dict[str, object]], state.get("source_policies", {})),
                 )
             )
             record_source_success(str(root_path))
@@ -531,6 +550,7 @@ def discover_from_sources(
                     failure_counts=cast(dict[str, int], state.get("failure_counts", {})),
                     retry_cooldown_minutes=int(state.get("retry_cooldown_minutes", DEFAULT_RETRY_COOLDOWN_MINUTES)),
                     source_health=source_health(),
+                    source_policies=cast(dict[str, dict[str, object]], state.get("source_policies", {})),
                 )
             )
             record_source_success(http_source)
@@ -552,7 +572,9 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
     failure_counts = cast(dict[str, int], state.get("failure_counts", {}))
     retry_cooldown_minutes = int(state.get("retry_cooldown_minutes", DEFAULT_RETRY_COOLDOWN_MINUTES))
     current_source_health = source_health()
+    current_source_policies = cast(dict[str, dict[str, object]], state.get("source_policies", {}))
     for candidate in discovered_candidates():
+        resolved_source_policy = resolve_source_policy(str(candidate["source"]), current_source_policies)
         refreshed_candidate = DiscoveryCandidate(
             source=str(candidate["source"]),
             source_type=str(candidate["source_type"]),
@@ -566,7 +588,7 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
             release_notes=cast(str | None, candidate.get("release_notes")),
             channel=str(candidate.get("channel", "stable")),
             ring=str(candidate.get("ring", "general")),
-            priority=int(candidate.get("priority", 0)),
+            priority=int(resolved_source_policy.get("priority_override", candidate.get("priority", 0))),
             approval_required=bool(candidate.get("approval_required", False)),
             approved=approval_key(candidate) in approvals or not bool(candidate.get("approval_required", False)),
             selectable=bool(candidate.get("compatible", True)),
@@ -575,6 +597,7 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
             source_reputation=int(
                 current_source_health.get(str(candidate["source"]), {}).get("reputation", candidate.get("source_reputation", 50))
             ),
+            source_policy=resolved_source_policy,
         )
         if refreshed_candidate.channel not in allowed_channels:
             refreshed_candidate.selectable = False
@@ -598,11 +621,18 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
             refreshed_candidate.selection_reason = "source is not trusted"
         elif not within_maintenance_window(
             now=datetime.now(),
-            window_start=cast(str | None, state.get("maintenance_window_start")),
-            window_end=cast(str | None, state.get("maintenance_window_end")),
+            window_start=cast(str | None, resolved_source_policy.get("maintenance_window_start", state.get("maintenance_window_start"))),
+            window_end=cast(str | None, resolved_source_policy.get("maintenance_window_end", state.get("maintenance_window_end"))),
         ):
             refreshed_candidate.selectable = False
             refreshed_candidate.selection_reason = "outside maintenance window"
+        elif refreshed_candidate.source_type == "http" and poll_interval_active(
+            last_attempted_at=cast(str | None, current_source_health.get(str(candidate["source"]), {}).get("last_attempted_at")),
+            poll_interval_minutes=int(resolved_source_policy.get("poll_interval_minutes", 0)),
+            now=datetime.now(timezone.utc),
+        ):
+            refreshed_candidate.selectable = False
+            refreshed_candidate.selection_reason = "source poll interval active"
         elif cooldown_active(
             version=refreshed_candidate.version,
             failed_versions=failed_versions,
@@ -652,6 +682,7 @@ def init_layout(root: Path = LAYOUT.root) -> None:
     payload["source_backoff_base_minutes"] = payload.get("source_backoff_base_minutes") or DEFAULT_SOURCE_BACKOFF_BASE_MINUTES
     payload["source_quarantine_threshold"] = payload.get("source_quarantine_threshold") or DEFAULT_SOURCE_QUARANTINE_THRESHOLD
     payload["source_quarantine_minutes"] = payload.get("source_quarantine_minutes") or DEFAULT_SOURCE_QUARANTINE_MINUTES
+    payload["source_policies"] = payload.get("source_policies") or {}
     payload["retention_keep_releases"] = payload.get("retention_keep_releases") or DEFAULT_RETENTION_KEEP_RELEASES
     STATE_STORE.save(payload)
     typer.echo(f"initialized release layout at {root}")
@@ -766,6 +797,46 @@ def set_trusted_usb_roots(roots: list[str]) -> None:
     STATE_STORE.update(trusted_usb_roots=roots)
     record_event(LAYOUT, "trusted_usb_roots_changed", version=",".join(roots) or "none")
     typer.echo(json.dumps({"trusted_usb_roots": roots, "discovered": refresh_cached_candidate_flags()}, indent=2))
+
+
+@app.command("set-source-policy")
+def set_source_policy(
+    source_prefix: str,
+    priority_override: int | None = None,
+    maintenance_window_start: str | None = None,
+    maintenance_window_end: str | None = None,
+    poll_interval_minutes: int | None = None,
+) -> None:
+    state = STATE_STORE.load()
+    policies = cast(dict[str, dict[str, object]], state.get("source_policies", {}))
+    existing = dict(policies.get(source_prefix, {}))
+    if priority_override is not None:
+        existing["priority_override"] = priority_override
+    if maintenance_window_start is not None:
+        existing["maintenance_window_start"] = maintenance_window_start
+    if maintenance_window_end is not None:
+        existing["maintenance_window_end"] = maintenance_window_end
+    if poll_interval_minutes is not None:
+        existing["poll_interval_minutes"] = poll_interval_minutes
+    policies[source_prefix] = existing
+    STATE_STORE.update(source_policies=policies)
+    record_event(LAYOUT, "source_policy_changed", version=source_prefix, source=source_prefix)
+    typer.echo(json.dumps({"source_policies": policies, "discovered": refresh_cached_candidate_flags()}, indent=2))
+
+
+@app.command("clear-source-policy")
+def clear_source_policy(source_prefix: str) -> None:
+    state = STATE_STORE.load()
+    policies = cast(dict[str, dict[str, object]], state.get("source_policies", {}))
+    policies.pop(source_prefix, None)
+    STATE_STORE.update(source_policies=policies)
+    record_event(LAYOUT, "source_policy_cleared", version=source_prefix, source=source_prefix)
+    typer.echo(json.dumps({"source_policies": policies, "discovered": refresh_cached_candidate_flags()}, indent=2))
+
+
+@app.command("list-source-policies")
+def list_source_policies() -> None:
+    typer.echo(json.dumps(STATE_STORE.load().get("source_policies", {}), indent=2))
 
 
 @app.command("set-retry-cooldown")

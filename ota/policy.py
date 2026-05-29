@@ -130,6 +130,34 @@ def source_block_reason(entry: dict[str, object] | None, *, now: datetime) -> st
     return None
 
 
+def resolve_source_policy(
+    source: str,
+    source_policies: dict[str, dict[str, object]] | None,
+) -> dict[str, object]:
+    if not source_policies:
+        return {}
+    matched_prefixes = [prefix for prefix in source_policies if source.startswith(prefix)]
+    if not matched_prefixes:
+        return {}
+    best_prefix = max(matched_prefixes, key=len)
+    return dict(source_policies[best_prefix])
+
+
+def poll_interval_active(
+    *,
+    last_attempted_at: str | None,
+    poll_interval_minutes: int,
+    now: datetime,
+) -> bool:
+    if poll_interval_minutes <= 0:
+        return False
+    timestamp = parse_timestamp(last_attempted_at)
+    if not timestamp:
+        return False
+    comparison_now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    return comparison_now < timestamp + timedelta(minutes=poll_interval_minutes)
+
+
 def evaluate_manifest_policy(
     manifest: BundleManifest,
     *,

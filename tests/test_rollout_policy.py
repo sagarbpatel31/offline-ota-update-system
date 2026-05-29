@@ -8,6 +8,8 @@ from ota.policy import (
     adaptive_cooldown_minutes,
     adaptive_source_backoff_minutes,
     cooldown_active,
+    poll_interval_active,
+    resolve_source_policy,
     source_backoff_active,
     source_is_trusted,
     source_quarantined,
@@ -193,6 +195,32 @@ class RolloutPolicyTests(unittest.TestCase):
             source_quarantined(
                 {"quarantined_until": "2026-01-01T02:00:00+00:00"},
                 now=datetime(2026, 1, 1, 2, 30),
+            )
+        )
+
+    def test_resolve_source_policy_prefers_longest_prefix(self) -> None:
+        policy = resolve_source_policy(
+            "http://updates.local/team-a/device",
+            {
+                "http://updates.local/": {"priority_override": 2},
+                "http://updates.local/team-a/": {"priority_override": 8},
+            },
+        )
+        self.assertEqual(policy["priority_override"], 8)
+
+    def test_poll_interval_active(self) -> None:
+        self.assertTrue(
+            poll_interval_active(
+                last_attempted_at="2026-01-01T00:00:00+00:00",
+                poll_interval_minutes=15,
+                now=datetime(2026, 1, 1, 0, 10),
+            )
+        )
+        self.assertFalse(
+            poll_interval_active(
+                last_attempted_at="2026-01-01T00:00:00+00:00",
+                poll_interval_minutes=15,
+                now=datetime(2026, 1, 1, 0, 20),
             )
         )
 
