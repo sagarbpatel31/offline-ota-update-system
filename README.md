@@ -99,11 +99,15 @@ python -m agent.main poll-loop --interval-seconds 60
 
 ```bash
 python -m agent.main device-status
+python -m agent.main audit-summary
 curl http://127.0.0.1:8000/api/status
 curl http://127.0.0.1:8000/api/history
 curl http://127.0.0.1:8000/api/service
 curl http://127.0.0.1:8000/api/discovered
 curl http://127.0.0.1:8000/api/discovered/latest
+curl http://127.0.0.1:8000/api/audit/attempts
+curl http://127.0.0.1:8000/api/audit/policy
+curl http://127.0.0.1:8000/api/audit/summary
 ```
 
 ### Run the local dashboard
@@ -148,12 +152,13 @@ This repository is scaffolded for MVP implementation. The current code provides:
 - device-model, minimum-agent-version, and anti-downgrade policy checks
 - latest-compatible bundle selection with optional release notes metadata
 - Raspberry Pi polling loop and bootstrap scripts for unattended updates
+- structured audit summaries for attempts, policy rejections, and selection flow
 - starter FastAPI dashboard
 - starter agent CLI
 - systemd service skeleton
 
 ## Next Milestones
 
-- Add update audit log and dashboard views
 - Add rollout policy and background scheduling
 - Add richer update attempt reporting in the dashboard
+- Add channel/ring controls for stable vs canary rollout

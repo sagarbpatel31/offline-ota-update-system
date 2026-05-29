@@ -99,3 +99,64 @@ def append_history(layout: ReleaseLayout, event: dict[str, Any]) -> None:
     layout.ensure()
     with layout.history_file.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, sort_keys=True) + "\n")
+
+
+def read_history(layout: ReleaseLayout) -> list[dict[str, Any]]:
+    if not layout.history_file.exists():
+        return []
+    return [json.loads(line) for line in layout.history_file.read_text().splitlines() if line.strip()]
+
+
+def summarize_attempts(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    terminal_events = {
+        "health_check_passed": "success",
+        "rollback": "rolled_back",
+        "rollback_unavailable": "failed_without_rollback",
+        "policy_rejected": "policy_rejected",
+        "activation_failed": "activation_failed",
+    }
+    attempts: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+
+    for event in history:
+        event_name = event.get("event")
+        version = event.get("version")
+        timestamp = event.get("timestamp")
+
+        if event_name in {"verified", "policy_rejected"}:
+            current = {
+                "version": version,
+                "started_at": timestamp,
+                "status": terminal_events.get(event_name, "in_progress"),
+                "events": [event_name],
+                "error": event.get("error"),
+                "restored_version": None,
+            }
+            if event_name in terminal_events:
+                current["finished_at"] = timestamp
+            attempts.append(current)
+        elif current and current.get("version") == version:
+            current["events"].append(event_name)
+            if event.get("error"):
+                current["error"] = event.get("error")
+            if event.get("restored_version"):
+                current["restored_version"] = event.get("restored_version")
+            if event_name in terminal_events:
+                current["status"] = terminal_events[event_name]
+                current["finished_at"] = timestamp
+
+    return attempts
+
+
+def summarize_policy_events(history: list[dict[str, Any]]) -> dict[str, Any]:
+    policy_rejections = [event for event in history if event.get("event") == "policy_rejected"]
+    by_reason: dict[str, int] = {}
+    for event in policy_rejections:
+        reason = event.get("error") or "unknown"
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+
+    return {
+        "count": len(policy_rejections),
+        "by_reason": by_reason,
+        "latest": policy_rejections[-1] if policy_rejections else None,
+    }

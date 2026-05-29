@@ -21,8 +21,11 @@ from ota.release import (
     copy_bundle_artifacts,
     previous_version,
     promote_release,
+    read_history,
     rollback_release,
     stage_release,
+    summarize_attempts,
+    summarize_policy_events,
 )
 from ota.state import DeviceStateStore, utc_now
 
@@ -401,6 +404,14 @@ def list_discovered() -> None:
 @app.command("select-latest")
 def select_latest() -> None:
     payload = selected_candidate_payload()
+    if payload:
+        record_event(
+            LAYOUT,
+            "selection_made",
+            version=str(payload["candidate"]["version"]),
+            source=str(payload["candidate"]["source"]),
+            source_type=str(payload["candidate"]["source_type"]),
+        )
     typer.echo(json.dumps(payload, indent=2))
 
 
@@ -443,6 +454,13 @@ def install_latest(
     if not payload:
         raise typer.BadParameter("no compatible discovered bundles available")
     candidate = payload["candidate"]
+    record_event(
+        LAYOUT,
+        "selection_made",
+        version=str(candidate["version"]),
+        source=str(candidate["source"]),
+        source_type=str(candidate["source_type"]),
+    )
     public_key = candidate.get("public_key_path")
     if not public_key:
         raise typer.BadParameter("selected bundle is missing a public key path")
@@ -470,6 +488,13 @@ def poll_once(
         return
 
     index, candidate = selection
+    record_event(
+        LAYOUT,
+        "selection_made",
+        version=str(candidate["version"]),
+        source=str(candidate["source"]),
+        source_type=str(candidate["source_type"]),
+    )
     public_key = candidate.get("public_key_path")
     if not public_key:
         raise typer.BadParameter("selected bundle is missing a public key path")
@@ -536,6 +561,17 @@ def layout(root: Path = LAYOUT.root) -> None:
         "active_link": str(release_layout.active_link),
         "history_file": str(release_layout.history_file),
         "active_version": active_version(release_layout),
+    }
+    typer.echo(json.dumps(payload, indent=2))
+
+
+@app.command("audit-summary")
+def audit_summary(root: Path = LAYOUT.root) -> None:
+    release_layout = ReleaseLayout(root)
+    history = read_history(release_layout)
+    payload = {
+        "attempts": summarize_attempts(history),
+        "policy": summarize_policy_events(history),
     }
     typer.echo(json.dumps(payload, indent=2))
 
