@@ -55,6 +55,9 @@ DEFAULT_ACTIVATE_COMMAND = os.getenv("OFFLINE_OTA_ACTIVATE_COMMAND")
 DEFAULT_USB_MOUNT_ROOTS = os.getenv("OFFLINE_OTA_USB_MOUNT_ROOTS", "/media,/mnt").split(",")
 DEFAULT_HTTP_SOURCES = [value for value in os.getenv("OFFLINE_OTA_HTTP_SOURCES", "").split(",") if value]
 DEFAULT_POLL_INTERVAL_SECONDS = int(os.getenv("OFFLINE_OTA_POLL_INTERVAL_SECONDS", "60"))
+DEFAULT_ROLLOUT_RING = os.getenv("OFFLINE_OTA_ROLLOUT_RING", "general")
+DEFAULT_MAINTENANCE_WINDOW_START = os.getenv("OFFLINE_OTA_MAINTENANCE_WINDOW_START")
+DEFAULT_MAINTENANCE_WINDOW_END = os.getenv("OFFLINE_OTA_MAINTENANCE_WINDOW_END")
 
 
 def read_state() -> str:
@@ -337,7 +340,10 @@ def discover_from_sources(
                     root_path,
                     policy_context=policy_context(),
                     rollout_channel=state["rollout_channel"],
+                    rollout_ring=state["rollout_ring"],
                     approved_updates=approved_updates(),
+                    maintenance_window_start=cast(str | None, state.get("maintenance_window_start")),
+                    maintenance_window_end=cast(str | None, state.get("maintenance_window_end")),
                 )
             )
 
@@ -349,7 +355,10 @@ def discover_from_sources(
                     cache_name=f"http-{len(candidates)}",
                     policy_context=policy_context(),
                     rollout_channel=state["rollout_channel"],
+                    rollout_ring=state["rollout_ring"],
                     approved_updates=approved_updates(),
+                    maintenance_window_start=cast(str | None, state.get("maintenance_window_start")),
+                    maintenance_window_end=cast(str | None, state.get("maintenance_window_end")),
                 )
             )
         except Exception as error:
@@ -363,6 +372,7 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
     refreshed: list[dict[str, object]] = []
     approvals = approved_updates()
     allowed_channels = {"stable"} if state["rollout_channel"] == "stable" else {"stable", "canary"}
+    allowed_rings = {"general"} if state["rollout_ring"] == "general" else {"general", state["rollout_ring"]}
     for candidate in discovered_candidates():
         refreshed_candidate = DiscoveryCandidate(
             source=str(candidate["source"]),
@@ -376,6 +386,7 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
             policy_reason=cast(str | None, candidate.get("policy_reason")),
             release_notes=cast(str | None, candidate.get("release_notes")),
             channel=str(candidate.get("channel", "stable")),
+            ring=str(candidate.get("ring", "general")),
             priority=int(candidate.get("priority", 0)),
             approval_required=bool(candidate.get("approval_required", False)),
             approved=approval_key(candidate) in approvals or not bool(candidate.get("approval_required", False)),
@@ -386,6 +397,11 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
             refreshed_candidate.selectable = False
             refreshed_candidate.selection_reason = (
                 f"channel {refreshed_candidate.channel} is not allowed for rollout channel {state['rollout_channel']}"
+            )
+        elif refreshed_candidate.ring not in allowed_rings:
+            refreshed_candidate.selectable = False
+            refreshed_candidate.selection_reason = (
+                f"ring {refreshed_candidate.ring} is not allowed for rollout ring {state['rollout_ring']}"
             )
         elif refreshed_candidate.approval_required and not refreshed_candidate.approved:
             refreshed_candidate.selectable = False
@@ -415,7 +431,11 @@ def verify(
 def init_layout(root: Path = LAYOUT.root) -> None:
     layout = ReleaseLayout(root)
     layout.ensure()
-    STATE_STORE.save(STATE_STORE.load())
+    payload = STATE_STORE.load()
+    payload["rollout_ring"] = payload.get("rollout_ring") or DEFAULT_ROLLOUT_RING
+    payload["maintenance_window_start"] = payload.get("maintenance_window_start") or DEFAULT_MAINTENANCE_WINDOW_START
+    payload["maintenance_window_end"] = payload.get("maintenance_window_end") or DEFAULT_MAINTENANCE_WINDOW_END
+    STATE_STORE.save(payload)
     typer.echo(f"initialized release layout at {root}")
 
 
@@ -489,6 +509,31 @@ def set_rollout_channel(channel: str) -> None:
     STATE_STORE.update(rollout_channel=channel)
     record_event(LAYOUT, "rollout_channel_changed", version=channel)
     typer.echo(json.dumps({"rollout_channel": channel, "discovered": refresh_cached_candidate_flags()}, indent=2))
+
+
+@app.command("set-rollout-ring")
+def set_rollout_ring(ring: str) -> None:
+    if ring not in {"general", "canary-a", "canary-b"}:
+        raise typer.BadParameter("rollout ring must be one of: general, canary-a, canary-b")
+    STATE_STORE.update(rollout_ring=ring)
+    record_event(LAYOUT, "rollout_ring_changed", version=ring)
+    typer.echo(json.dumps({"rollout_ring": ring, "discovered": refresh_cached_candidate_flags()}, indent=2))
+
+
+@app.command("set-maintenance-window")
+def set_maintenance_window(start: str, end: str) -> None:
+    STATE_STORE.update(maintenance_window_start=start, maintenance_window_end=end)
+    record_event(LAYOUT, "maintenance_window_changed", version=f"{start}-{end}")
+    typer.echo(
+        json.dumps(
+            {
+                "maintenance_window_start": start,
+                "maintenance_window_end": end,
+                "discovered": refresh_cached_candidate_flags(),
+            },
+            indent=2,
+        )
+    )
 
 
 @app.command("list-approvals")

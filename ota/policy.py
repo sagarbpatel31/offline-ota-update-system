@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from ota.bundle import BundleManifest
 
@@ -30,6 +31,26 @@ def compare_versions(left: str, right: str) -> int:
 class PolicyResult:
     allowed: bool
     reason: str | None = None
+
+
+def within_maintenance_window(
+    *,
+    now: datetime,
+    window_start: str | None,
+    window_end: str | None,
+) -> bool:
+    if not window_start or not window_end:
+        return True
+
+    start_hour, start_minute = [int(part) for part in window_start.split(":", maxsplit=1)]
+    end_hour, end_minute = [int(part) for part in window_end.split(":", maxsplit=1)]
+    current_minutes = now.hour * 60 + now.minute
+    start_minutes = start_hour * 60 + start_minute
+    end_minutes = end_hour * 60 + end_minute
+
+    if start_minutes <= end_minutes:
+        return start_minutes <= current_minutes <= end_minutes
+    return current_minutes >= start_minutes or current_minutes <= end_minutes
 
 
 def evaluate_manifest_policy(

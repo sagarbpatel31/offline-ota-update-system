@@ -37,6 +37,18 @@ def status() -> dict[str, object]:
     return payload
 
 
+@app.get("/api/policy")
+def policy_state() -> dict[str, object]:
+    payload = STATE_STORE.load()
+    return {
+        "rollout_channel": payload["rollout_channel"],
+        "rollout_ring": payload["rollout_ring"],
+        "maintenance_window_start": payload["maintenance_window_start"],
+        "maintenance_window_end": payload["maintenance_window_end"],
+        "approved_updates": payload["approved_updates"],
+    }
+
+
 @app.get("/api/history")
 def history() -> list[dict[str, object]]:
     return read_history(LAYOUT)
