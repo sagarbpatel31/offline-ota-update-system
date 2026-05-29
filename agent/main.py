@@ -14,7 +14,7 @@ import typer
 from ota.bundle import BundleManifest, VerifiedBundle, load_signed_manifest, sha256_file
 from ota.crypto import verify_manifest_signature
 from ota.discovery import DiscoveryCandidate, discover_usb_candidates, download_http_bundle, select_latest_compatible
-from ota.policy import evaluate_manifest_policy
+from ota.policy import evaluate_manifest_policy, within_maintenance_window
 from ota.release import (
     ReleaseLayout,
     active_version,
@@ -403,6 +403,13 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
             refreshed_candidate.selection_reason = (
                 f"ring {refreshed_candidate.ring} is not allowed for rollout ring {state['rollout_ring']}"
             )
+        elif not within_maintenance_window(
+            now=datetime.now(),
+            window_start=cast(str | None, state.get("maintenance_window_start")),
+            window_end=cast(str | None, state.get("maintenance_window_end")),
+        ):
+            refreshed_candidate.selectable = False
+            refreshed_candidate.selection_reason = "outside maintenance window"
         elif refreshed_candidate.approval_required and not refreshed_candidate.approved:
             refreshed_candidate.selectable = False
             refreshed_candidate.selection_reason = "manual approval required"
