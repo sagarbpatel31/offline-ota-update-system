@@ -23,6 +23,12 @@ class DiscoveryCandidate:
     compatible: bool = True
     policy_reason: str | None = None
     release_notes: str | None = None
+    channel: str = "stable"
+    priority: int = 0
+    approval_required: bool = False
+    approved: bool = True
+    selectable: bool = True
+    selection_reason: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -36,6 +42,12 @@ class DiscoveryCandidate:
             "compatible": self.compatible,
             "policy_reason": self.policy_reason,
             "release_notes": self.release_notes,
+            "channel": self.channel,
+            "priority": self.priority,
+            "approval_required": self.approval_required,
+            "approved": self.approved,
+            "selectable": self.selectable,
+            "selection_reason": self.selection_reason,
         }
 
 
@@ -60,10 +72,29 @@ def load_candidate(
     public_key_path: Path | None = None,
     *,
     policy_result: PolicyResult | None = None,
+    rollout_channel: str = "stable",
+    approved_updates: set[str] | None = None,
 ) -> DiscoveryCandidate:
     envelope = load_signed_manifest(bundle_path)
     manifest = envelope.manifest
     bundle_index = parse_bundle_index(bundle_path.parent / "bundle-index.json")
+    channel = str(bundle_index.get("channel", "stable"))
+    priority = int(bundle_index.get("priority", 0))
+    approval_required = bool(bundle_index.get("requires_approval", False))
+    approval_key = f"{source}|{manifest.version}"
+    approved = (not approval_required) or (approved_updates is not None and approval_key in approved_updates)
+    allowed_channels = {"stable"} if rollout_channel == "stable" else {"stable", "canary"}
+    selection_reason = None
+    selectable = True
+    if channel not in allowed_channels:
+        selectable = False
+        selection_reason = f"channel {channel} is not allowed for rollout channel {rollout_channel}"
+    elif policy_result and not policy_result.allowed:
+        selectable = False
+        selection_reason = policy_result.reason
+    elif approval_required and not approved:
+        selectable = False
+        selection_reason = "manual approval required"
     return DiscoveryCandidate(
         source=source,
         source_type=source_type,
@@ -75,6 +106,12 @@ def load_candidate(
         compatible=policy_result.allowed if policy_result else True,
         policy_reason=policy_result.reason if policy_result else None,
         release_notes=bundle_index.get("release_notes"),
+        channel=channel,
+        priority=priority,
+        approval_required=approval_required,
+        approved=approved,
+        selectable=selectable,
+        selection_reason=selection_reason,
     )
 
 
@@ -82,6 +119,8 @@ def discover_usb_candidates(
     mount_root: Path,
     *,
     policy_context: dict[str, str | None] | None = None,
+    rollout_channel: str = "stable",
+    approved_updates: set[str] | None = None,
 ) -> list[DiscoveryCandidate]:
     candidates: list[DiscoveryCandidate] = []
     for bundle_path in sorted(mount_root.rglob("signed-bundle.json")):
@@ -104,6 +143,8 @@ def discover_usb_candidates(
                 source_type="usb",
                 public_key_path=public_key if public_key.exists() else None,
                 policy_result=policy_result,
+                rollout_channel=rollout_channel,
+                approved_updates=approved_updates,
             )
         )
     return candidates
@@ -114,6 +155,8 @@ def download_http_bundle(
     cache_name: str = "http",
     *,
     policy_context: dict[str, str | None] | None = None,
+    rollout_channel: str = "stable",
+    approved_updates: set[str] | None = None,
 ) -> DiscoveryCandidate:
     cache_dir = discovery_cache_dir(cache_name)
     if cache_dir.exists():
@@ -165,12 +208,14 @@ def download_http_bundle(
         source_type="http",
         public_key_path=public_key if public_key.exists() else None,
         policy_result=policy_result,
+        rollout_channel=rollout_channel,
+        approved_updates=approved_updates,
     )
 
 
 def select_latest_compatible(candidates: list[dict[str, object]]) -> tuple[int, dict[str, object]] | None:
     compatible_candidates = [
-        (index, candidate) for index, candidate in enumerate(candidates) if candidate.get("compatible") is True
+        (index, candidate) for index, candidate in enumerate(candidates) if candidate.get("selectable") is True
     ]
     if not compatible_candidates:
         return None
@@ -178,6 +223,8 @@ def select_latest_compatible(candidates: list[dict[str, object]]) -> tuple[int, 
     compatible_candidates.sort(
         key=lambda item: (
             parse_version(str(item[1]["version"])),
+            int(item[1].get("priority", 0)),
+            1 if item[1].get("channel") == "canary" else 0,
             1 if item[1].get("source_type") == "http" else 0,
             str(item[1].get("source")),
         ),

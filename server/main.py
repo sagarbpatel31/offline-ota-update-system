@@ -6,7 +6,15 @@ from fastapi import FastAPI
 
 from demo_service.app import service_metadata
 from ota.discovery import select_latest_compatible
-from ota.release import ReleaseLayout, active_version, read_history, summarize_attempts, summarize_policy_events
+from ota.release import (
+    ReleaseLayout,
+    active_version,
+    find_attempt,
+    read_history,
+    summarize_attempts,
+    summarize_policy_events,
+    summarize_selection_events,
+)
 from ota.state import DeviceStateStore
 
 
@@ -63,10 +71,21 @@ def audit_policy() -> dict[str, object]:
     return summarize_policy_events(read_history(LAYOUT))
 
 
+@app.get("/api/audit/selection")
+def audit_selection() -> dict[str, object]:
+    return summarize_selection_events(read_history(LAYOUT))
+
+
 @app.get("/api/audit/summary")
 def audit_summary() -> dict[str, object]:
     history = read_history(LAYOUT)
     return {
         "attempts": summarize_attempts(history),
         "policy": summarize_policy_events(history),
+        "selection": summarize_selection_events(history),
     }
+
+
+@app.get("/api/audit/attempts/{attempt_id}")
+def audit_attempt_detail(attempt_id: str) -> dict[str, object] | None:
+    return find_attempt(summarize_attempts(read_history(LAYOUT)), attempt_id)

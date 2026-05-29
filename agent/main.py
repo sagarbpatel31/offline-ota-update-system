@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from typing import cast
 from urllib.error import URLError
 from urllib.request import urlopen
 
@@ -19,6 +20,7 @@ from ota.release import (
     active_version,
     append_history,
     copy_bundle_artifacts,
+    find_attempt,
     previous_version,
     promote_release,
     read_history,
@@ -26,6 +28,7 @@ from ota.release import (
     stage_release,
     summarize_attempts,
     summarize_policy_events,
+    summarize_selection_events,
 )
 from ota.state import DeviceStateStore, utc_now
 
@@ -292,6 +295,14 @@ def policy_context() -> dict[str, str | None]:
     }
 
 
+def approved_updates() -> set[str]:
+    return set(STATE_STORE.load().get("approved_updates", []))
+
+
+def approval_key(candidate: dict[str, object]) -> str:
+    return f"{candidate['source']}|{candidate['version']}"
+
+
 def save_discovered_candidates(candidates: list[DiscoveryCandidate]) -> list[dict[str, object]]:
     payload = [candidate.as_dict() for candidate in candidates]
     STATE_STORE.update(discovered_bundles=payload, update_state=UpdateState.idle.value, last_checked_at=utc_now())
@@ -314,21 +325,77 @@ def discover_from_sources(
     usb_mount_roots: list[str] | None = None,
     http_sources: list[str] | None = None,
 ) -> list[dict[str, object]]:
+    state = STATE_STORE.load()
     STATE_STORE.update(update_state=UpdateState.discovering.value, last_error=None, last_checked_at=utc_now())
     candidates: list[DiscoveryCandidate] = []
 
-    for mount_root in usb_mount_roots or DEFAULT_USB_MOUNT_ROOTS:
+    for mount_root in DEFAULT_USB_MOUNT_ROOTS if usb_mount_roots is None else usb_mount_roots:
         root_path = Path(mount_root).expanduser()
         if root_path.exists():
-            candidates.extend(discover_usb_candidates(root_path, policy_context=policy_context()))
+            candidates.extend(
+                discover_usb_candidates(
+                    root_path,
+                    policy_context=policy_context(),
+                    rollout_channel=state["rollout_channel"],
+                    approved_updates=approved_updates(),
+                )
+            )
 
-    for http_source in http_sources or DEFAULT_HTTP_SOURCES:
+    for http_source in DEFAULT_HTTP_SOURCES if http_sources is None else http_sources:
         try:
-            candidates.append(download_http_bundle(http_source, cache_name=f"http-{len(candidates)}", policy_context=policy_context()))
+            candidates.append(
+                download_http_bundle(
+                    http_source,
+                    cache_name=f"http-{len(candidates)}",
+                    policy_context=policy_context(),
+                    rollout_channel=state["rollout_channel"],
+                    approved_updates=approved_updates(),
+                )
+            )
         except Exception as error:
             STATE_STORE.update(last_error=str(error))
 
     return save_discovered_candidates(candidates)
+
+
+def refresh_cached_candidate_flags() -> list[dict[str, object]]:
+    state = STATE_STORE.load()
+    refreshed: list[dict[str, object]] = []
+    approvals = approved_updates()
+    allowed_channels = {"stable"} if state["rollout_channel"] == "stable" else {"stable", "canary"}
+    for candidate in discovered_candidates():
+        refreshed_candidate = DiscoveryCandidate(
+            source=str(candidate["source"]),
+            source_type=str(candidate["source_type"]),
+            bundle_path=Path(str(candidate["bundle_path"])),
+            bundle_dir=Path(str(candidate["bundle_dir"])),
+            public_key_path=Path(str(candidate["public_key_path"])) if candidate.get("public_key_path") else None,
+            version=str(candidate["version"]),
+            device_model=str(candidate["device_model"]),
+            compatible=bool(candidate.get("compatible", True)),
+            policy_reason=cast(str | None, candidate.get("policy_reason")),
+            release_notes=cast(str | None, candidate.get("release_notes")),
+            channel=str(candidate.get("channel", "stable")),
+            priority=int(candidate.get("priority", 0)),
+            approval_required=bool(candidate.get("approval_required", False)),
+            approved=approval_key(candidate) in approvals or not bool(candidate.get("approval_required", False)),
+            selectable=bool(candidate.get("compatible", True)),
+            selection_reason=cast(str | None, candidate.get("policy_reason")),
+        )
+        if refreshed_candidate.channel not in allowed_channels:
+            refreshed_candidate.selectable = False
+            refreshed_candidate.selection_reason = (
+                f"channel {refreshed_candidate.channel} is not allowed for rollout channel {state['rollout_channel']}"
+            )
+        elif refreshed_candidate.approval_required and not refreshed_candidate.approved:
+            refreshed_candidate.selectable = False
+            refreshed_candidate.selection_reason = "manual approval required"
+        elif refreshed_candidate.compatible:
+            refreshed_candidate.selectable = True
+            refreshed_candidate.selection_reason = None
+        refreshed.append(refreshed_candidate.as_dict())
+    STATE_STORE.update(discovered_bundles=refreshed)
+    return refreshed
 
 
 @app.command()
@@ -415,6 +482,46 @@ def select_latest() -> None:
     typer.echo(json.dumps(payload, indent=2))
 
 
+@app.command("set-rollout-channel")
+def set_rollout_channel(channel: str) -> None:
+    if channel not in {"stable", "canary"}:
+        raise typer.BadParameter("rollout channel must be 'stable' or 'canary'")
+    STATE_STORE.update(rollout_channel=channel)
+    record_event(LAYOUT, "rollout_channel_changed", version=channel)
+    typer.echo(json.dumps({"rollout_channel": channel, "discovered": refresh_cached_candidate_flags()}, indent=2))
+
+
+@app.command("list-approvals")
+def list_approvals() -> None:
+    typer.echo(json.dumps(sorted(approved_updates()), indent=2))
+
+
+@app.command("approve-discovered")
+def approve_discovered(index: int) -> None:
+    candidates = discovered_candidates()
+    if index < 0 or index >= len(candidates):
+        raise typer.BadParameter(f"discovery index out of range: {index}")
+    approvals = approved_updates()
+    approvals.add(approval_key(candidates[index]))
+    STATE_STORE.update(approved_updates=sorted(approvals))
+    record_event(LAYOUT, "approval_granted", version=str(candidates[index]["version"]), source=str(candidates[index]["source"]))
+    refresh = refresh_cached_candidate_flags()
+    typer.echo(json.dumps({"approved": approval_key(candidates[index]), "discovered": refresh}, indent=2))
+
+
+@app.command("revoke-approval")
+def revoke_approval(index: int) -> None:
+    candidates = discovered_candidates()
+    if index < 0 or index >= len(candidates):
+        raise typer.BadParameter(f"discovery index out of range: {index}")
+    approvals = approved_updates()
+    approvals.discard(approval_key(candidates[index]))
+    STATE_STORE.update(approved_updates=sorted(approvals))
+    record_event(LAYOUT, "approval_revoked", version=str(candidates[index]["version"]), source=str(candidates[index]["source"]))
+    refresh = refresh_cached_candidate_flags()
+    typer.echo(json.dumps({"revoked": approval_key(candidates[index]), "discovered": refresh}, indent=2))
+
+
 @app.command("install-discovered")
 def install_discovered(
     index: int = 0,
@@ -428,9 +535,8 @@ def install_discovered(
         raise typer.BadParameter(f"discovery index out of range: {index}")
 
     candidate = candidates[index]
-    compatible = candidate.get("compatible")
-    if compatible is False:
-        raise typer.BadParameter(f"discovered bundle is incompatible: {candidate.get('policy_reason')}")
+    if candidate.get("selectable") is not True:
+        raise typer.BadParameter(f"discovered bundle is not selectable: {candidate.get('selection_reason')}")
     public_key = candidate.get("public_key_path")
     if not public_key:
         raise typer.BadParameter("discovered bundle is missing a public key path")
@@ -572,8 +678,16 @@ def audit_summary(root: Path = LAYOUT.root) -> None:
     payload = {
         "attempts": summarize_attempts(history),
         "policy": summarize_policy_events(history),
+        "selection": summarize_selection_events(history),
     }
     typer.echo(json.dumps(payload, indent=2))
+
+
+@app.command("audit-attempt")
+def audit_attempt(attempt_id: str, root: Path = LAYOUT.root) -> None:
+    release_layout = ReleaseLayout(root)
+    attempt = find_attempt(summarize_attempts(read_history(release_layout)), attempt_id)
+    typer.echo(json.dumps(attempt, indent=2))
 
 
 if __name__ == "__main__":

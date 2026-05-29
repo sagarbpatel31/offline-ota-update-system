@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -125,10 +126,12 @@ def summarize_attempts(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
         if event_name in {"verified", "policy_rejected"}:
             current = {
+                "attempt_id": make_attempt_id(str(timestamp), str(version)),
                 "version": version,
                 "started_at": timestamp,
                 "status": terminal_events.get(event_name, "in_progress"),
                 "events": [event_name],
+                "timeline": [event],
                 "error": event.get("error"),
                 "restored_version": None,
             }
@@ -137,6 +140,7 @@ def summarize_attempts(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
             attempts.append(current)
         elif current and current.get("version") == version:
             current["events"].append(event_name)
+            current["timeline"].append(event)
             if event.get("error"):
                 current["error"] = event.get("error")
             if event.get("restored_version"):
@@ -146,6 +150,31 @@ def summarize_attempts(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 current["finished_at"] = timestamp
 
     return attempts
+
+
+def make_attempt_id(timestamp: str, version: str) -> str:
+    raw = f"{timestamp}-{version}"
+    return re.sub(r"[^A-Za-z0-9]+", "-", raw).strip("-").lower()
+
+
+def find_attempt(attempts: list[dict[str, Any]], attempt_id: str) -> dict[str, Any] | None:
+    for attempt in attempts:
+        if attempt.get("attempt_id") == attempt_id:
+            return attempt
+    return None
+
+
+def summarize_selection_events(history: list[dict[str, Any]]) -> dict[str, Any]:
+    selections = [event for event in history if event.get("event") == "selection_made"]
+    by_source_type: dict[str, int] = {}
+    for event in selections:
+        source_type = event.get("source_type") or "unknown"
+        by_source_type[source_type] = by_source_type.get(source_type, 0) + 1
+    return {
+        "count": len(selections),
+        "by_source_type": by_source_type,
+        "latest": selections[-1] if selections else None,
+    }
 
 
 def summarize_policy_events(history: list[dict[str, Any]]) -> dict[str, Any]:

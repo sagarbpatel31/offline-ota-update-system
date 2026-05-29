@@ -80,8 +80,11 @@ python -m agent.main install --activate-command "systemctl restart offline-ota-d
 ```bash
 python -m agent.main discover-usb --mount-root /media
 python -m agent.main discover-http http://192.168.1.50:8081/
+python -m agent.main set-rollout-channel stable
 python -m agent.main list-discovered
 python -m agent.main select-latest
+python -m agent.main approve-discovered 0
+python -m agent.main list-approvals
 python -m agent.main install-discovered --index 0 --activate-command "systemctl restart offline-ota-demo.service"
 python -m agent.main install-latest --activate-command "systemctl restart offline-ota-demo.service"
 ```
@@ -100,6 +103,7 @@ python -m agent.main poll-loop --interval-seconds 60
 ```bash
 python -m agent.main device-status
 python -m agent.main audit-summary
+python -m agent.main audit-attempt ATTEMPT_ID
 curl http://127.0.0.1:8000/api/status
 curl http://127.0.0.1:8000/api/history
 curl http://127.0.0.1:8000/api/service
@@ -107,7 +111,9 @@ curl http://127.0.0.1:8000/api/discovered
 curl http://127.0.0.1:8000/api/discovered/latest
 curl http://127.0.0.1:8000/api/audit/attempts
 curl http://127.0.0.1:8000/api/audit/policy
+curl http://127.0.0.1:8000/api/audit/selection
 curl http://127.0.0.1:8000/api/audit/summary
+curl http://127.0.0.1:8000/api/audit/attempts/ATTEMPT_ID
 ```
 
 ### Run the local dashboard
@@ -153,12 +159,13 @@ This repository is scaffolded for MVP implementation. The current code provides:
 - latest-compatible bundle selection with optional release notes metadata
 - Raspberry Pi polling loop and bootstrap scripts for unattended updates
 - structured audit summaries for attempts, policy rejections, and selection flow
+- rollout-channel controls and manual approval gating for discovered bundles
 - starter FastAPI dashboard
 - starter agent CLI
 - systemd service skeleton
 
 ## Next Milestones
 
-- Add rollout policy and background scheduling
 - Add richer update attempt reporting in the dashboard
 - Add channel/ring controls for stable vs canary rollout
+- Add scheduled maintenance windows and approval policies
