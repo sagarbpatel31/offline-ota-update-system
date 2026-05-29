@@ -3,7 +3,7 @@ import os
 import shutil
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import cast
@@ -15,7 +15,14 @@ import typer
 from ota.bundle import BundleManifest, VerifiedBundle, load_signed_manifest, sha256_file
 from ota.crypto import verify_manifest_signature
 from ota.discovery import DiscoveryCandidate, discover_usb_candidates, download_http_bundle, select_latest_compatible
-from ota.policy import adaptive_cooldown_minutes, cooldown_active, evaluate_manifest_policy, within_maintenance_window
+from ota.policy import (
+    adaptive_cooldown_minutes,
+    adaptive_source_backoff_minutes,
+    cooldown_active,
+    evaluate_manifest_policy,
+    source_block_reason,
+    within_maintenance_window,
+)
 from ota.release import (
     ReleaseLayout,
     active_version,
@@ -63,6 +70,9 @@ DEFAULT_MAINTENANCE_WINDOW_END = os.getenv("OFFLINE_OTA_MAINTENANCE_WINDOW_END")
 DEFAULT_TRUSTED_HTTP_SOURCES = [value for value in os.getenv("OFFLINE_OTA_TRUSTED_HTTP_SOURCES", "").split(",") if value]
 DEFAULT_TRUSTED_USB_ROOTS = [value for value in os.getenv("OFFLINE_OTA_TRUSTED_USB_ROOTS", "").split(",") if value]
 DEFAULT_RETRY_COOLDOWN_MINUTES = int(os.getenv("OFFLINE_OTA_RETRY_COOLDOWN_MINUTES", "30"))
+DEFAULT_SOURCE_BACKOFF_BASE_MINUTES = int(os.getenv("OFFLINE_OTA_SOURCE_BACKOFF_BASE_MINUTES", "5"))
+DEFAULT_SOURCE_QUARANTINE_THRESHOLD = int(os.getenv("OFFLINE_OTA_SOURCE_QUARANTINE_THRESHOLD", "3"))
+DEFAULT_SOURCE_QUARANTINE_MINUTES = int(os.getenv("OFFLINE_OTA_SOURCE_QUARANTINE_MINUTES", "60"))
 DEFAULT_RETENTION_KEEP_RELEASES = int(os.getenv("OFFLINE_OTA_RETENTION_KEEP_RELEASES", "3"))
 
 
@@ -331,26 +341,75 @@ def source_health() -> dict[str, dict[str, object]]:
     return cast(dict[str, dict[str, object]], STATE_STORE.load().get("source_health", {}))
 
 
+def source_health_entry(source: str) -> dict[str, object]:
+    return source_health().get(
+        source,
+        {
+            "score": 100,
+            "successes": 0,
+            "failures": 0,
+            "consecutive_failures": 0,
+            "skips": 0,
+            "skip_reasons": {},
+            "last_error": None,
+            "backoff_until": None,
+            "quarantined_until": None,
+        },
+    )
+
+
 def record_source_success(source: str) -> None:
     health = source_health()
-    current = health.get(source, {"score": 100, "successes": 0, "failures": 0, "last_error": None})
+    current = source_health_entry(source)
     current["score"] = min(100, int(current.get("score", 100)) + 5)
     current["successes"] = int(current.get("successes", 0)) + 1
+    current["consecutive_failures"] = 0
     current["last_error"] = None
+    current["last_skip_reason"] = None
+    current["backoff_until"] = None
+    current["quarantined_until"] = None
     current["last_seen_at"] = utc_now()
     health[source] = current
     STATE_STORE.update(source_health=health)
 
 
 def record_source_failure(source: str, error: str) -> None:
+    state = STATE_STORE.load()
     health = source_health()
-    current = health.get(source, {"score": 100, "successes": 0, "failures": 0, "last_error": None})
+    current = source_health_entry(source)
     current["score"] = max(0, int(current.get("score", 100)) - 20)
     current["failures"] = int(current.get("failures", 0)) + 1
+    current["consecutive_failures"] = int(current.get("consecutive_failures", 0)) + 1
     current["last_error"] = error
     current["last_seen_at"] = utc_now()
+    backoff_minutes = adaptive_source_backoff_minutes(
+        base_minutes=int(state.get("source_backoff_base_minutes", DEFAULT_SOURCE_BACKOFF_BASE_MINUTES)),
+        consecutive_failures=int(current["consecutive_failures"]),
+    )
+    current["backoff_until"] = (datetime.now(timezone.utc) + timedelta(minutes=backoff_minutes)).isoformat()
+    quarantine_threshold = int(state.get("source_quarantine_threshold", DEFAULT_SOURCE_QUARANTINE_THRESHOLD))
+    if int(current["consecutive_failures"]) >= quarantine_threshold:
+        quarantine_minutes = int(state.get("source_quarantine_minutes", DEFAULT_SOURCE_QUARANTINE_MINUTES))
+        current["quarantined_until"] = (datetime.now(timezone.utc) + timedelta(minutes=quarantine_minutes)).isoformat()
     health[source] = current
     STATE_STORE.update(source_health=health, last_error=error)
+
+
+def record_source_skip(source: str, reason: str) -> None:
+    health = source_health()
+    current = source_health_entry(source)
+    skip_reasons = cast(dict[str, int], current.get("skip_reasons", {}))
+    skip_reasons[reason] = int(skip_reasons.get(reason, 0)) + 1
+    current["skip_reasons"] = skip_reasons
+    current["skips"] = int(current.get("skips", 0)) + 1
+    current["last_skip_reason"] = reason
+    current["last_seen_at"] = utc_now()
+    health[source] = current
+    STATE_STORE.update(source_health=health)
+
+
+def blocked_http_source_reason(source: str) -> str | None:
+    return source_block_reason(source_health().get(source), now=datetime.now(timezone.utc))
 
 
 def cooldown_minutes_for_state(state: dict[str, object], version: str) -> int:
@@ -409,6 +468,10 @@ def discover_from_sources(
             record_source_success(str(root_path))
 
     for http_source in DEFAULT_HTTP_SOURCES if http_sources is None else http_sources:
+        blocked_reason = blocked_http_source_reason(http_source)
+        if blocked_reason:
+            record_source_skip(http_source, blocked_reason)
+            continue
         try:
             candidates.append(
                 download_http_bundle(
@@ -540,6 +603,9 @@ def init_layout(root: Path = LAYOUT.root) -> None:
     payload["trusted_http_sources"] = payload.get("trusted_http_sources") or DEFAULT_TRUSTED_HTTP_SOURCES
     payload["trusted_usb_roots"] = payload.get("trusted_usb_roots") or DEFAULT_TRUSTED_USB_ROOTS
     payload["retry_cooldown_minutes"] = payload.get("retry_cooldown_minutes") or DEFAULT_RETRY_COOLDOWN_MINUTES
+    payload["source_backoff_base_minutes"] = payload.get("source_backoff_base_minutes") or DEFAULT_SOURCE_BACKOFF_BASE_MINUTES
+    payload["source_quarantine_threshold"] = payload.get("source_quarantine_threshold") or DEFAULT_SOURCE_QUARANTINE_THRESHOLD
+    payload["source_quarantine_minutes"] = payload.get("source_quarantine_minutes") or DEFAULT_SOURCE_QUARANTINE_MINUTES
     payload["retention_keep_releases"] = payload.get("retention_keep_releases") or DEFAULT_RETENTION_KEEP_RELEASES
     STATE_STORE.save(payload)
     typer.echo(f"initialized release layout at {root}")
@@ -663,6 +729,28 @@ def set_retry_cooldown(minutes: int) -> None:
     typer.echo(json.dumps({"retry_cooldown_minutes": minutes, "discovered": refresh_cached_candidate_flags()}, indent=2))
 
 
+@app.command("set-source-backoff")
+def set_source_backoff(minutes: int) -> None:
+    STATE_STORE.update(source_backoff_base_minutes=minutes)
+    record_event(LAYOUT, "source_backoff_changed", version=str(minutes))
+    typer.echo(json.dumps({"source_backoff_base_minutes": minutes}, indent=2))
+
+
+@app.command("set-source-quarantine")
+def set_source_quarantine(threshold: int, minutes: int) -> None:
+    STATE_STORE.update(source_quarantine_threshold=threshold, source_quarantine_minutes=minutes)
+    record_event(LAYOUT, "source_quarantine_changed", version=f"{threshold}:{minutes}")
+    typer.echo(
+        json.dumps(
+            {
+                "source_quarantine_threshold": threshold,
+                "source_quarantine_minutes": minutes,
+            },
+            indent=2,
+        )
+    )
+
+
 @app.command("set-retention")
 def set_retention(keep_releases: int) -> None:
     STATE_STORE.update(retention_keep_releases=keep_releases)
@@ -689,6 +777,11 @@ def cleanup(root: Path = LAYOUT.root) -> None:
 @app.command("list-approvals")
 def list_approvals() -> None:
     typer.echo(json.dumps(sorted(approved_updates()), indent=2))
+
+
+@app.command("source-health")
+def source_health_command() -> None:
+    typer.echo(json.dumps(source_health(), indent=2))
 
 
 @app.command("approve-discovered")

@@ -86,11 +86,14 @@ python -m agent.main set-maintenance-window 01:00 05:00
 python -m agent.main set-trusted-http-sources http://192.168.1.50:8081/
 python -m agent.main set-trusted-usb-roots /media /mnt
 python -m agent.main set-retry-cooldown 30
+python -m agent.main set-source-backoff 5
+python -m agent.main set-source-quarantine 3 60
 python -m agent.main set-retention 3
 python -m agent.main list-discovered
 python -m agent.main select-latest
 python -m agent.main approve-discovered 0
 python -m agent.main list-approvals
+python -m agent.main source-health
 python -m agent.main install-discovered --index 0 --activate-command "systemctl restart offline-ota-demo.service"
 python -m agent.main install-latest --activate-command "systemctl restart offline-ota-demo.service"
 ```
@@ -122,6 +125,8 @@ curl http://127.0.0.1:8000/api/audit/policy
 curl http://127.0.0.1:8000/api/audit/selection
 curl http://127.0.0.1:8000/api/audit/summary
 curl http://127.0.0.1:8000/api/audit/attempts/ATTEMPT_ID
+curl http://127.0.0.1:8000/api/metrics/policy
+curl http://127.0.0.1:8000/api/metrics/sources
 ```
 
 ### Run the local dashboard

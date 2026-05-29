@@ -4,7 +4,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from ota.discovery import select_latest_compatible
-from ota.policy import adaptive_cooldown_minutes, cooldown_active, source_is_trusted, within_maintenance_window
+from ota.policy import (
+    adaptive_cooldown_minutes,
+    adaptive_source_backoff_minutes,
+    cooldown_active,
+    source_backoff_active,
+    source_is_trusted,
+    source_quarantined,
+    within_maintenance_window,
+)
 from ota.release import ReleaseLayout, prune_old_releases
 
 
@@ -123,6 +131,40 @@ class RolloutPolicyTests(unittest.TestCase):
                 failed_versions={"1.0.0": "2026-01-01T00:00:00+00:00"},
                 cooldown_minutes=30,
                 now=datetime(2026, 1, 1, 1, 0),
+            )
+        )
+
+    def test_adaptive_source_backoff_minutes_scales_and_caps(self) -> None:
+        self.assertEqual(adaptive_source_backoff_minutes(base_minutes=5, consecutive_failures=1), 5)
+        self.assertEqual(adaptive_source_backoff_minutes(base_minutes=5, consecutive_failures=2), 10)
+        self.assertEqual(adaptive_source_backoff_minutes(base_minutes=5, consecutive_failures=3), 20)
+        self.assertEqual(adaptive_source_backoff_minutes(base_minutes=120, consecutive_failures=10), 12 * 60)
+
+    def test_source_backoff_active(self) -> None:
+        self.assertTrue(
+            source_backoff_active(
+                {"backoff_until": "2026-01-01T00:10:00+00:00"},
+                now=datetime(2026, 1, 1, 0, 5),
+            )
+        )
+        self.assertFalse(
+            source_backoff_active(
+                {"backoff_until": "2026-01-01T00:10:00+00:00"},
+                now=datetime(2026, 1, 1, 0, 15),
+            )
+        )
+
+    def test_source_quarantined(self) -> None:
+        self.assertTrue(
+            source_quarantined(
+                {"quarantined_until": "2026-01-01T02:00:00+00:00"},
+                now=datetime(2026, 1, 1, 1, 30),
+            )
+        )
+        self.assertFalse(
+            source_quarantined(
+                {"quarantined_until": "2026-01-01T02:00:00+00:00"},
+                now=datetime(2026, 1, 1, 2, 30),
             )
         )
 

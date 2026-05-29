@@ -59,6 +59,23 @@ def source_is_trusted(source: str, *, trusted_sources: list[str]) -> bool:
     return any(source.startswith(prefix) for prefix in trusted_sources)
 
 
+def parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def timestamp_active(value: str | None, *, now: datetime) -> bool:
+    timestamp = parse_timestamp(value)
+    if not timestamp:
+        return False
+    comparison_now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    return comparison_now < timestamp
+
+
 def cooldown_active(
     *,
     version: str,
@@ -66,12 +83,8 @@ def cooldown_active(
     cooldown_minutes: int,
     now: datetime,
 ) -> bool:
-    failed_at = failed_versions.get(version)
-    if not failed_at:
-        return False
-    try:
-        timestamp = datetime.fromisoformat(failed_at.replace("Z", "+00:00"))
-    except ValueError:
+    timestamp = parse_timestamp(failed_versions.get(version))
+    if not timestamp:
         return False
     comparison_now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
     return comparison_now < timestamp + timedelta(minutes=cooldown_minutes)
@@ -85,6 +98,36 @@ def adaptive_cooldown_minutes(
 ) -> int:
     scaled = base_minutes * (2 ** max(failure_count - 1, 0))
     return min(scaled, max_minutes)
+
+
+def adaptive_source_backoff_minutes(
+    *,
+    base_minutes: int,
+    consecutive_failures: int,
+    max_minutes: int = 12 * 60,
+) -> int:
+    scaled = base_minutes * (2 ** max(consecutive_failures - 1, 0))
+    return min(scaled, max_minutes)
+
+
+def source_backoff_active(entry: dict[str, object] | None, *, now: datetime) -> bool:
+    if not entry:
+        return False
+    return timestamp_active(entry.get("backoff_until"), now=now)
+
+
+def source_quarantined(entry: dict[str, object] | None, *, now: datetime) -> bool:
+    if not entry:
+        return False
+    return timestamp_active(entry.get("quarantined_until"), now=now)
+
+
+def source_block_reason(entry: dict[str, object] | None, *, now: datetime) -> str | None:
+    if source_quarantined(entry, now=now):
+        return "source is quarantined"
+    if source_backoff_active(entry, now=now):
+        return "source fetch backoff active"
+    return None
 
 
 def evaluate_manifest_policy(

@@ -6,6 +6,7 @@ from fastapi import FastAPI
 
 from demo_service.app import service_metadata
 from ota.discovery import select_latest_compatible
+from ota.policy import source_backoff_active, source_quarantined
 from ota.release import (
     ReleaseLayout,
     active_version,
@@ -21,6 +22,56 @@ from ota.state import DeviceStateStore
 app = FastAPI(title="Offline OTA Dashboard", version="0.1.0")
 STATE_STORE = DeviceStateStore(Path("artifacts/device-state.json"))
 LAYOUT = ReleaseLayout(Path("artifacts/device"))
+
+
+def source_health_metrics() -> dict[str, object]:
+    payload = STATE_STORE.load()
+    now = datetime.now(timezone.utc)
+    source_health = payload.get("source_health", {})
+    sources: list[dict[str, object]] = []
+    skip_reasons: dict[str, int] = {}
+    for source, entry in source_health.items():
+        source_entry = dict(entry)
+        blocked_reason = None
+        if source_quarantined(source_entry, now=now):
+            blocked_reason = "source is quarantined"
+        elif source_backoff_active(source_entry, now=now):
+            blocked_reason = "source fetch backoff active"
+        for reason, count in dict(source_entry.get("skip_reasons", {})).items():
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + int(count)
+        source_entry["source"] = source
+        source_entry["backoff_active"] = blocked_reason == "source fetch backoff active"
+        source_entry["quarantined"] = blocked_reason == "source is quarantined"
+        source_entry["blocked_reason"] = blocked_reason
+        sources.append(source_entry)
+
+    return {
+        "sources": sources,
+        "summary": {
+            "total_sources": len(sources),
+            "quarantined_sources": sum(1 for source in sources if source["quarantined"]),
+            "backoff_sources": sum(1 for source in sources if source["backoff_active"]),
+            "skip_reasons": skip_reasons,
+        },
+    }
+
+
+def policy_metrics() -> dict[str, object]:
+    discovered = STATE_STORE.load().get("discovered_bundles", [])
+    selection_reasons: dict[str, int] = {}
+    selectable = 0
+    for candidate in discovered:
+        if candidate.get("selectable") is True:
+            selectable += 1
+            continue
+        reason = str(candidate.get("selection_reason") or "unknown")
+        selection_reasons[reason] = selection_reasons.get(reason, 0) + 1
+    return {
+        "discovered_total": len(discovered),
+        "selectable_total": selectable,
+        "blocked_total": len(discovered) - selectable,
+        "selection_reasons": selection_reasons,
+    }
 
 
 @app.get("/health")
@@ -48,6 +99,9 @@ def policy_state() -> dict[str, object]:
         "trusted_http_sources": payload["trusted_http_sources"],
         "trusted_usb_roots": payload["trusted_usb_roots"],
         "retry_cooldown_minutes": payload["retry_cooldown_minutes"],
+        "source_backoff_base_minutes": payload["source_backoff_base_minutes"],
+        "source_quarantine_threshold": payload["source_quarantine_threshold"],
+        "source_quarantine_minutes": payload["source_quarantine_minutes"],
         "failure_counts": payload["failure_counts"],
         "source_health": payload["source_health"],
         "retention_keep_releases": payload["retention_keep_releases"],
@@ -108,3 +162,13 @@ def audit_summary() -> dict[str, object]:
 @app.get("/api/audit/attempts/{attempt_id}")
 def audit_attempt_detail(attempt_id: str) -> dict[str, object] | None:
     return find_attempt(summarize_attempts(read_history(LAYOUT)), attempt_id)
+
+
+@app.get("/api/metrics/policy")
+def metrics_policy() -> dict[str, object]:
+    return policy_metrics()
+
+
+@app.get("/api/metrics/sources")
+def metrics_sources() -> dict[str, object]:
+    return source_health_metrics()
