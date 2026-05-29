@@ -36,6 +36,11 @@ class SourceMetricsTests(unittest.TestCase):
                 "source_affinity_ttl_hours": 72,
                 "source_channel_decay_threshold": 3,
                 "source_channel_decay_penalty": 20,
+                "bundle_channel_failure_threshold": 3,
+                "bundle_channel_failure_penalty": 30,
+                "bundle_channel_stats": {
+                    "1.2.0": {"stable": {"successes": 1, "failures": 3}},
+                },
                 "source_channel_stats": {
                     "http://source-a.local": {"stable": {"successes": 3, "failures": 1}},
                     "http://source-b.local": {"stable": {"successes": 0, "failures": 2}},
@@ -64,6 +69,7 @@ class SourceMetricsTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["event_counts"]["failure"], 1)
         self.assertEqual(payload["summary"]["event_counts"]["skip"], 1)
         self.assertEqual(payload["summary"]["source_affinity_ttl_hours"], 72)
+        self.assertEqual(payload["summary"]["bundle_channel_failure_threshold"], 3)
 
 
 if __name__ == "__main__":

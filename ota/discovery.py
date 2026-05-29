@@ -12,6 +12,7 @@ from ota.bundle import SignedManifestEnvelope, load_signed_manifest
 from ota.policy import (
     affinity_active,
     decayed_channel_success_rate,
+    degraded_bundle_channel,
     PolicyResult,
     cooldown_active,
     evaluate_manifest_policy,
@@ -46,6 +47,8 @@ class DiscoveryCandidate:
     source_policy: dict[str, object] | None = None
     preferred_source: bool = False
     channel_success_rate: int = 0
+    bundle_channel_success_rate: int = 0
+    bundle_channel_degraded: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -71,6 +74,8 @@ class DiscoveryCandidate:
             "source_policy": self.source_policy or {},
             "preferred_source": self.preferred_source,
             "channel_success_rate": self.channel_success_rate,
+            "bundle_channel_success_rate": self.bundle_channel_success_rate,
+            "bundle_channel_degraded": self.bundle_channel_degraded,
         }
 
 
@@ -111,6 +116,9 @@ def load_candidate(
     source_affinity_ttl_hours: int = 72,
     source_channel_decay_threshold: int = 3,
     source_channel_decay_penalty: int = 20,
+    bundle_channel_stats: dict[str, dict[str, dict[str, int | str]]] | None = None,
+    bundle_channel_failure_threshold: int = 3,
+    bundle_channel_failure_penalty: int = 30,
 ) -> DiscoveryCandidate:
     envelope = load_signed_manifest(bundle_path)
     manifest = envelope.manifest
@@ -149,6 +157,21 @@ def load_candidate(
         decay_penalty=source_channel_decay_penalty,
         now=datetime.now(),
     )
+    bundle_stats = (((bundle_channel_stats or {}).get(manifest.version) or {}).get(channel) or {})
+    bundle_successes = int(bundle_stats.get("successes", 0))
+    bundle_failures = int(bundle_stats.get("failures", 0))
+    bundle_channel_success_rate = decayed_channel_success_rate(
+        successes=bundle_successes,
+        failures=bundle_failures,
+        last_failure_at=str(bundle_stats.get("last_failure_at")) if bundle_stats.get("last_failure_at") else None,
+        decay_threshold=bundle_channel_failure_threshold,
+        decay_penalty=bundle_channel_failure_penalty,
+        now=datetime.now(),
+    )
+    bundle_channel_degraded = degraded_bundle_channel(
+        failures=bundle_failures,
+        threshold=bundle_channel_failure_threshold,
+    )
     allowed_channels = {"stable"} if rollout_channel == "stable" else {"stable", "canary"}
     allowed_rings = {"general"} if rollout_ring == "general" else {"general", rollout_ring}
     selection_reason = None
@@ -180,6 +203,9 @@ def load_candidate(
     elif policy_result and not policy_result.allowed:
         selectable = False
         selection_reason = policy_result.reason
+    elif bundle_channel_degraded:
+        selectable = False
+        selection_reason = "bundle version is degraded for this rollout channel"
     elif approval_required and not approved:
         selectable = False
         selection_reason = "manual approval required"
@@ -206,6 +232,8 @@ def load_candidate(
         source_policy=source_policy,
         preferred_source=preferred_source,
         channel_success_rate=channel_success_rate,
+        bundle_channel_success_rate=bundle_channel_success_rate,
+        bundle_channel_degraded=bundle_channel_degraded,
     )
 
 
@@ -229,6 +257,9 @@ def discover_usb_candidates(
     source_affinity_ttl_hours: int = 72,
     source_channel_decay_threshold: int = 3,
     source_channel_decay_penalty: int = 20,
+    bundle_channel_stats: dict[str, dict[str, dict[str, int | str]]] | None = None,
+    bundle_channel_failure_threshold: int = 3,
+    bundle_channel_failure_penalty: int = 30,
 ) -> list[DiscoveryCandidate]:
     candidates: list[DiscoveryCandidate] = []
     for bundle_path in sorted(mount_root.rglob("signed-bundle.json")):
@@ -267,6 +298,9 @@ def discover_usb_candidates(
                 source_affinity_ttl_hours=source_affinity_ttl_hours,
                 source_channel_decay_threshold=source_channel_decay_threshold,
                 source_channel_decay_penalty=source_channel_decay_penalty,
+                bundle_channel_stats=bundle_channel_stats,
+                bundle_channel_failure_threshold=bundle_channel_failure_threshold,
+                bundle_channel_failure_penalty=bundle_channel_failure_penalty,
             )
         )
     return candidates
@@ -293,6 +327,9 @@ def download_http_bundle(
     source_affinity_ttl_hours: int = 72,
     source_channel_decay_threshold: int = 3,
     source_channel_decay_penalty: int = 20,
+    bundle_channel_stats: dict[str, dict[str, dict[str, int | str]]] | None = None,
+    bundle_channel_failure_threshold: int = 3,
+    bundle_channel_failure_penalty: int = 30,
 ) -> DiscoveryCandidate:
     cache_dir = discovery_cache_dir(cache_name)
     if cache_dir.exists():
@@ -360,6 +397,9 @@ def download_http_bundle(
         source_affinity_ttl_hours=source_affinity_ttl_hours,
         source_channel_decay_threshold=source_channel_decay_threshold,
         source_channel_decay_penalty=source_channel_decay_penalty,
+        bundle_channel_stats=bundle_channel_stats,
+        bundle_channel_failure_threshold=bundle_channel_failure_threshold,
+        bundle_channel_failure_penalty=bundle_channel_failure_penalty,
     )
 
 
@@ -374,6 +414,7 @@ def select_latest_compatible(candidates: list[dict[str, object]]) -> tuple[int, 
         key=lambda item: (
             parse_version(str(item[1]["version"])),
             int(item[1].get("priority", 0)),
+            int(item[1].get("bundle_channel_success_rate", 0)),
             1 if item[1].get("preferred_source") else 0,
             int(item[1].get("channel_success_rate", 0)),
             int(item[1].get("source_reputation", 50)),

@@ -21,6 +21,7 @@ from ota.policy import (
     affinity_active,
     cooldown_active,
     decayed_channel_success_rate,
+    degraded_bundle_channel,
     evaluate_manifest_policy,
     poll_interval_active,
     resolve_source_policy,
@@ -80,6 +81,8 @@ DEFAULT_SOURCE_QUARANTINE_MINUTES = int(os.getenv("OFFLINE_OTA_SOURCE_QUARANTINE
 DEFAULT_SOURCE_AFFINITY_TTL_HOURS = int(os.getenv("OFFLINE_OTA_SOURCE_AFFINITY_TTL_HOURS", "72"))
 DEFAULT_SOURCE_CHANNEL_DECAY_THRESHOLD = int(os.getenv("OFFLINE_OTA_SOURCE_CHANNEL_DECAY_THRESHOLD", "3"))
 DEFAULT_SOURCE_CHANNEL_DECAY_PENALTY = int(os.getenv("OFFLINE_OTA_SOURCE_CHANNEL_DECAY_PENALTY", "20"))
+DEFAULT_BUNDLE_CHANNEL_FAILURE_THRESHOLD = int(os.getenv("OFFLINE_OTA_BUNDLE_CHANNEL_FAILURE_THRESHOLD", "3"))
+DEFAULT_BUNDLE_CHANNEL_FAILURE_PENALTY = int(os.getenv("OFFLINE_OTA_BUNDLE_CHANNEL_FAILURE_PENALTY", "30"))
 DEFAULT_RETENTION_KEEP_RELEASES = int(os.getenv("OFFLINE_OTA_RETENTION_KEEP_RELEASES", "3"))
 
 
@@ -208,6 +211,7 @@ def install_bundle_flow(
         )
         if selected_source and selected_channel:
             update_source_channel_result(selected_source, selected_channel, success=False)
+            update_bundle_channel_result(manifest.version, selected_channel, success=False)
         return state_store.load()
 
     state_store.update(candidate_version=manifest.version)
@@ -250,6 +254,7 @@ def install_bundle_flow(
         )
         if selected_source and selected_channel:
             update_source_channel_result(selected_source, selected_channel, success=False)
+            update_bundle_channel_result(manifest.version, selected_channel, success=False)
         rollback_target = previous_version(release_layout)
         if rollback_target:
             rolled_back_version = rollback_release(release_layout)
@@ -282,6 +287,7 @@ def install_bundle_flow(
         record_event(release_layout, "health_check_passed", version=manifest.version, source=selected_source)
         if selected_source and selected_channel:
             update_source_channel_result(selected_source, selected_channel, success=True)
+            update_bundle_channel_result(manifest.version, selected_channel, success=True)
         failed_versions = state_store.load().get("failed_versions", {})
         failed_versions.pop(manifest.version, None)
         failure_counts = state_store.load().get("failure_counts", {})
@@ -311,6 +317,7 @@ def install_bundle_flow(
         )
         if selected_source and selected_channel:
             update_source_channel_result(selected_source, selected_channel, success=False)
+            update_bundle_channel_result(manifest.version, selected_channel, success=False)
         failed_versions = state_store.load().get("failed_versions", {})
         failed_versions[manifest.version] = utc_now()
         failure_counts = state_store.load().get("failure_counts", {})
@@ -337,6 +344,7 @@ def install_bundle_flow(
     )
     if selected_source and selected_channel:
         update_source_channel_result(selected_source, selected_channel, success=False)
+        update_bundle_channel_result(manifest.version, selected_channel, success=False)
     failed_versions = state_store.load().get("failed_versions", {})
     failed_versions[manifest.version] = utc_now()
     failure_counts = state_store.load().get("failure_counts", {})
@@ -378,6 +386,10 @@ def source_channel_stats() -> dict[str, dict[str, dict[str, int]]]:
     return cast(dict[str, dict[str, dict[str, int]]], STATE_STORE.load().get("source_channel_stats", {}))
 
 
+def bundle_channel_stats() -> dict[str, dict[str, dict[str, object]]]:
+    return cast(dict[str, dict[str, dict[str, object]]], STATE_STORE.load().get("bundle_channel_stats", {}))
+
+
 def update_source_channel_result(source: str, channel: str, success: bool) -> None:
     stats = source_channel_stats()
     source_stats = dict(stats.get(source, {}))
@@ -396,6 +408,21 @@ def update_source_channel_result(source: str, channel: str, success: bool) -> No
         preferred[channel] = {"source": source, "last_success_at": utc_now()}
         changes["last_good_source_by_channel"] = preferred
     STATE_STORE.update(**changes)
+
+
+def update_bundle_channel_result(version: str, channel: str, success: bool) -> None:
+    stats = bundle_channel_stats()
+    version_stats = dict(stats.get(version, {}))
+    channel_stats = dict(version_stats.get(channel, {}))
+    key = "successes" if success else "failures"
+    channel_stats[key] = int(channel_stats.get(key, 0)) + 1
+    if success:
+        channel_stats["last_success_at"] = utc_now()
+    else:
+        channel_stats["last_failure_at"] = utc_now()
+    version_stats[channel] = channel_stats
+    stats[version] = version_stats
+    STATE_STORE.update(bundle_channel_stats=stats)
 
 
 def calculate_source_reputation(source: str, events: list[dict[str, object]]) -> int:
@@ -581,6 +608,9 @@ def discover_from_sources(
                     source_affinity_ttl_hours=int(state.get("source_affinity_ttl_hours", DEFAULT_SOURCE_AFFINITY_TTL_HOURS)),
                     source_channel_decay_threshold=int(state.get("source_channel_decay_threshold", DEFAULT_SOURCE_CHANNEL_DECAY_THRESHOLD)),
                     source_channel_decay_penalty=int(state.get("source_channel_decay_penalty", DEFAULT_SOURCE_CHANNEL_DECAY_PENALTY)),
+                    bundle_channel_stats=bundle_channel_stats(),
+                    bundle_channel_failure_threshold=int(state.get("bundle_channel_failure_threshold", DEFAULT_BUNDLE_CHANNEL_FAILURE_THRESHOLD)),
+                    bundle_channel_failure_penalty=int(state.get("bundle_channel_failure_penalty", DEFAULT_BUNDLE_CHANNEL_FAILURE_PENALTY)),
                 )
             )
             record_source_success(str(root_path))
@@ -612,6 +642,9 @@ def discover_from_sources(
                     source_affinity_ttl_hours=int(state.get("source_affinity_ttl_hours", DEFAULT_SOURCE_AFFINITY_TTL_HOURS)),
                     source_channel_decay_threshold=int(state.get("source_channel_decay_threshold", DEFAULT_SOURCE_CHANNEL_DECAY_THRESHOLD)),
                     source_channel_decay_penalty=int(state.get("source_channel_decay_penalty", DEFAULT_SOURCE_CHANNEL_DECAY_PENALTY)),
+                    bundle_channel_stats=bundle_channel_stats(),
+                    bundle_channel_failure_threshold=int(state.get("bundle_channel_failure_threshold", DEFAULT_BUNDLE_CHANNEL_FAILURE_THRESHOLD)),
+                    bundle_channel_failure_penalty=int(state.get("bundle_channel_failure_penalty", DEFAULT_BUNDLE_CHANNEL_FAILURE_PENALTY)),
                 )
             )
             record_source_success(http_source)
@@ -636,13 +669,18 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
     current_source_policies = cast(dict[str, dict[str, object]], state.get("source_policies", {}))
     preferred_sources = cast(dict[str, object], state.get("last_good_source_by_channel", {}))
     current_channel_stats = cast(dict[str, dict[str, dict[str, int]]], state.get("source_channel_stats", {}))
+    current_bundle_stats = cast(dict[str, dict[str, dict[str, object]]], state.get("bundle_channel_stats", {}))
     affinity_ttl_hours = int(state.get("source_affinity_ttl_hours", DEFAULT_SOURCE_AFFINITY_TTL_HOURS))
     decay_threshold = int(state.get("source_channel_decay_threshold", DEFAULT_SOURCE_CHANNEL_DECAY_THRESHOLD))
     decay_penalty = int(state.get("source_channel_decay_penalty", DEFAULT_SOURCE_CHANNEL_DECAY_PENALTY))
+    bundle_failure_threshold = int(state.get("bundle_channel_failure_threshold", DEFAULT_BUNDLE_CHANNEL_FAILURE_THRESHOLD))
+    bundle_failure_penalty = int(state.get("bundle_channel_failure_penalty", DEFAULT_BUNDLE_CHANNEL_FAILURE_PENALTY))
     for candidate in discovered_candidates():
         resolved_source_policy = resolve_source_policy(str(candidate["source"]), current_source_policies)
         channel = str(candidate.get("channel", "stable"))
         source_stats = (((current_channel_stats.get(str(candidate["source"]), {}) or {}).get(channel)) or {})
+        version = str(candidate["version"])
+        bundle_stats = (((current_bundle_stats.get(version) or {}).get(channel)) or {})
         successes = int(source_stats.get("successes", 0))
         failures = int(source_stats.get("failures", 0))
         last_good_entry = preferred_sources.get(channel)
@@ -690,6 +728,18 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
                 decay_penalty=decay_penalty,
                 now=datetime.now(),
             ) if (successes + failures) else int(candidate.get("channel_success_rate", 0)),
+            bundle_channel_success_rate=decayed_channel_success_rate(
+                successes=int(bundle_stats.get("successes", 0)),
+                failures=int(bundle_stats.get("failures", 0)),
+                last_failure_at=cast(str | None, bundle_stats.get("last_failure_at")),
+                decay_threshold=bundle_failure_threshold,
+                decay_penalty=bundle_failure_penalty,
+                now=datetime.now(),
+            ) if (int(bundle_stats.get("successes", 0)) + int(bundle_stats.get("failures", 0))) else int(candidate.get("bundle_channel_success_rate", 0)),
+            bundle_channel_degraded=degraded_bundle_channel(
+                failures=int(bundle_stats.get("failures", 0)),
+                threshold=bundle_failure_threshold,
+            ),
         )
         if refreshed_candidate.channel not in allowed_channels:
             refreshed_candidate.selectable = False
@@ -725,6 +775,9 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
         ):
             refreshed_candidate.selectable = False
             refreshed_candidate.selection_reason = "source poll interval active"
+        elif refreshed_candidate.bundle_channel_degraded:
+            refreshed_candidate.selectable = False
+            refreshed_candidate.selection_reason = "bundle version is degraded for this rollout channel"
         elif cooldown_active(
             version=refreshed_candidate.version,
             failed_versions=failed_versions,
@@ -778,6 +831,8 @@ def init_layout(root: Path = LAYOUT.root) -> None:
     payload["source_affinity_ttl_hours"] = payload.get("source_affinity_ttl_hours") or DEFAULT_SOURCE_AFFINITY_TTL_HOURS
     payload["source_channel_decay_threshold"] = payload.get("source_channel_decay_threshold") or DEFAULT_SOURCE_CHANNEL_DECAY_THRESHOLD
     payload["source_channel_decay_penalty"] = payload.get("source_channel_decay_penalty") or DEFAULT_SOURCE_CHANNEL_DECAY_PENALTY
+    payload["bundle_channel_failure_threshold"] = payload.get("bundle_channel_failure_threshold") or DEFAULT_BUNDLE_CHANNEL_FAILURE_THRESHOLD
+    payload["bundle_channel_failure_penalty"] = payload.get("bundle_channel_failure_penalty") or DEFAULT_BUNDLE_CHANNEL_FAILURE_PENALTY
     payload["retention_keep_releases"] = payload.get("retention_keep_releases") or DEFAULT_RETENTION_KEEP_RELEASES
     STATE_STORE.save(payload)
     typer.echo(f"initialized release layout at {root}")
@@ -948,6 +1003,25 @@ def set_source_affinity(ttl_hours: int, decay_threshold: int, decay_penalty: int
                 "source_affinity_ttl_hours": ttl_hours,
                 "source_channel_decay_threshold": decay_threshold,
                 "source_channel_decay_penalty": decay_penalty,
+                "discovered": refresh_cached_candidate_flags(),
+            },
+            indent=2,
+        )
+    )
+
+
+@app.command("set-bundle-health-policy")
+def set_bundle_health_policy(failure_threshold: int, failure_penalty: int) -> None:
+    STATE_STORE.update(
+        bundle_channel_failure_threshold=failure_threshold,
+        bundle_channel_failure_penalty=failure_penalty,
+    )
+    record_event(LAYOUT, "bundle_health_policy_changed", version=f"{failure_threshold}:{failure_penalty}")
+    typer.echo(
+        json.dumps(
+            {
+                "bundle_channel_failure_threshold": failure_threshold,
+                "bundle_channel_failure_penalty": failure_penalty,
                 "discovered": refresh_cached_candidate_flags(),
             },
             indent=2,

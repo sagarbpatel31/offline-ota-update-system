@@ -134,6 +134,40 @@ class RolloutPolicyTests(unittest.TestCase):
         self.assertEqual(index, 0)
         self.assertEqual(candidate["channel_success_rate"], 90)
 
+    def test_select_latest_compatible_uses_bundle_channel_success_rate_before_source_affinity(self) -> None:
+        candidates = [
+            {
+                "version": "2.0.0",
+                "selectable": True,
+                "priority": 5,
+                "bundle_channel_success_rate": 95,
+                "preferred_source": False,
+                "channel_success_rate": 20,
+                "source_reputation": 20,
+                "source_score": 20,
+                "channel": "stable",
+                "source_type": "http",
+                "source": "http://a.local",
+            },
+            {
+                "version": "2.0.0",
+                "selectable": True,
+                "priority": 5,
+                "bundle_channel_success_rate": 10,
+                "preferred_source": True,
+                "channel_success_rate": 90,
+                "source_reputation": 90,
+                "source_score": 90,
+                "channel": "stable",
+                "source_type": "http",
+                "source": "http://b.local",
+            },
+        ]
+
+        index, candidate = select_latest_compatible(candidates)
+        self.assertEqual(index, 0)
+        self.assertEqual(candidate["bundle_channel_success_rate"], 95)
+
     def test_select_latest_compatible_returns_none_when_no_selectable_candidates(self) -> None:
         self.assertIsNone(select_latest_compatible([{"version": "1.0.0", "selectable": False}]))
 

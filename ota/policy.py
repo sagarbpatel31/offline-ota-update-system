@@ -195,6 +195,14 @@ def decayed_channel_success_rate(
     return base_rate
 
 
+def degraded_bundle_channel(
+    *,
+    failures: int,
+    threshold: int,
+) -> bool:
+    return failures >= threshold
+
+
 def evaluate_manifest_policy(
     manifest: BundleManifest,
     *,
