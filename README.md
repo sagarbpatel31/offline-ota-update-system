@@ -87,6 +87,8 @@ python -m agent.main set-trusted-http-sources http://192.168.1.50:8081/
 python -m agent.main set-trusted-usb-roots /media /mnt
 python -m agent.main set-source-policy http://192.168.1.50:8081/ 10 01:00 05:00 15
 python -m agent.main list-source-policies
+python -m agent.main source-health
+python -m agent.main source-events
 python -m agent.main set-retry-cooldown 30
 python -m agent.main set-source-backoff 5
 python -m agent.main set-source-quarantine 3 60
@@ -95,8 +97,6 @@ python -m agent.main list-discovered
 python -m agent.main select-latest
 python -m agent.main approve-discovered 0
 python -m agent.main list-approvals
-python -m agent.main source-health
-python -m agent.main source-events
 python -m agent.main install-discovered --index 0 --activate-command "systemctl restart offline-ota-demo.service"
 python -m agent.main install-latest --activate-command "systemctl restart offline-ota-demo.service"
 ```

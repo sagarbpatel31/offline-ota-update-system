@@ -14,6 +14,8 @@ class SourceMetricsTests(unittest.TestCase):
                     {"selectable": False, "selection_reason": "retry cooldown active"},
                 ],
                 "source_health": {},
+                "last_good_source_by_channel": {},
+                "source_channel_stats": {},
             }
             payload = policy_metrics()
         self.assertEqual(payload["discovered_total"], 3)
@@ -30,6 +32,11 @@ class SourceMetricsTests(unittest.TestCase):
                     {"timestamp": "2026-01-01T00:01:00+00:00", "source": "http://source-b.local", "event": "failure"},
                     {"timestamp": "2026-01-01T00:02:00+00:00", "source": "http://source-b.local", "event": "skip"},
                 ],
+                "last_good_source_by_channel": {"stable": "http://source-a.local"},
+                "source_channel_stats": {
+                    "http://source-a.local": {"stable": {"successes": 3, "failures": 1}},
+                    "http://source-b.local": {"stable": {"successes": 0, "failures": 2}},
+                },
                 "source_health": {
                     "http://source-a.local": {
                         "score": 40,

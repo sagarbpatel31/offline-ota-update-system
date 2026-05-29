@@ -68,6 +68,70 @@ class RolloutPolicyTests(unittest.TestCase):
         self.assertEqual(index, 1)
         self.assertEqual(candidate["source_reputation"], 80)
 
+    def test_select_latest_compatible_prefers_last_good_source_when_equal(self) -> None:
+        candidates = [
+            {
+                "version": "2.0.0",
+                "selectable": True,
+                "priority": 5,
+                "preferred_source": False,
+                "channel_success_rate": 95,
+                "source_reputation": 80,
+                "source_score": 80,
+                "channel": "stable",
+                "source_type": "http",
+                "source": "http://a.local",
+            },
+            {
+                "version": "2.0.0",
+                "selectable": True,
+                "priority": 5,
+                "preferred_source": True,
+                "channel_success_rate": 40,
+                "source_reputation": 50,
+                "source_score": 50,
+                "channel": "stable",
+                "source_type": "http",
+                "source": "http://b.local",
+            },
+        ]
+
+        index, candidate = select_latest_compatible(candidates)
+        self.assertEqual(index, 1)
+        self.assertTrue(candidate["preferred_source"])
+
+    def test_select_latest_compatible_uses_channel_success_rate_after_affinity(self) -> None:
+        candidates = [
+            {
+                "version": "2.0.0",
+                "selectable": True,
+                "priority": 5,
+                "preferred_source": False,
+                "channel_success_rate": 90,
+                "source_reputation": 50,
+                "source_score": 40,
+                "channel": "stable",
+                "source_type": "http",
+                "source": "http://a.local",
+            },
+            {
+                "version": "2.0.0",
+                "selectable": True,
+                "priority": 5,
+                "preferred_source": False,
+                "channel_success_rate": 20,
+                "source_reputation": 90,
+                "source_score": 90,
+                "channel": "stable",
+                "source_type": "http",
+                "source": "http://b.local",
+            },
+        ]
+
+        index, candidate = select_latest_compatible(candidates)
+        self.assertEqual(index, 0)
+        self.assertEqual(candidate["channel_success_rate"], 90)
+
     def test_select_latest_compatible_returns_none_when_no_selectable_candidates(self) -> None:
         self.assertIsNone(select_latest_compatible([{"version": "1.0.0", "selectable": False}]))
 

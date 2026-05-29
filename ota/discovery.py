@@ -42,6 +42,8 @@ class DiscoveryCandidate:
     source_score: int = 100
     source_reputation: int = 50
     source_policy: dict[str, object] | None = None
+    preferred_source: bool = False
+    channel_success_rate: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -65,6 +67,8 @@ class DiscoveryCandidate:
             "source_score": self.source_score,
             "source_reputation": self.source_reputation,
             "source_policy": self.source_policy or {},
+            "preferred_source": self.preferred_source,
+            "channel_success_rate": self.channel_success_rate,
         }
 
 
@@ -100,6 +104,8 @@ def load_candidate(
     retry_cooldown_minutes: int = 30,
     source_health: dict[str, dict[str, object]] | None = None,
     source_policies: dict[str, dict[str, object]] | None = None,
+    last_good_source_by_channel: dict[str, str] | None = None,
+    source_channel_stats: dict[str, dict[str, dict[str, int]]] | None = None,
 ) -> DiscoveryCandidate:
     envelope = load_signed_manifest(bundle_path)
     manifest = envelope.manifest
@@ -114,6 +120,12 @@ def load_candidate(
     failure_count = (failure_counts or {}).get(manifest.version, 0)
     source_score = int((source_health or {}).get(source, {}).get("score", 100))
     source_reputation = int((source_health or {}).get(source, {}).get("reputation", 50))
+    preferred_source = (last_good_source_by_channel or {}).get(channel) == source
+    channel_stats = (((source_channel_stats or {}).get(source) or {}).get(channel) or {})
+    successes = int(channel_stats.get("successes", 0))
+    failures = int(channel_stats.get("failures", 0))
+    total_attempts = successes + failures
+    channel_success_rate = int((successes * 100) / total_attempts) if total_attempts else 0
     allowed_channels = {"stable"} if rollout_channel == "stable" else {"stable", "canary"}
     allowed_rings = {"general"} if rollout_ring == "general" else {"general", rollout_ring}
     selection_reason = None
@@ -169,6 +181,8 @@ def load_candidate(
         source_score=source_score,
         source_reputation=source_reputation,
         source_policy=source_policy,
+        preferred_source=preferred_source,
+        channel_success_rate=channel_success_rate,
     )
 
 
@@ -187,6 +201,8 @@ def discover_usb_candidates(
     retry_cooldown_minutes: int = 30,
     source_health: dict[str, dict[str, object]] | None = None,
     source_policies: dict[str, dict[str, object]] | None = None,
+    last_good_source_by_channel: dict[str, str] | None = None,
+    source_channel_stats: dict[str, dict[str, dict[str, int]]] | None = None,
 ) -> list[DiscoveryCandidate]:
     candidates: list[DiscoveryCandidate] = []
     for bundle_path in sorted(mount_root.rglob("signed-bundle.json")):
@@ -220,6 +236,8 @@ def discover_usb_candidates(
                 retry_cooldown_minutes=retry_cooldown_minutes,
                 source_health=source_health,
                 source_policies=source_policies,
+                last_good_source_by_channel=last_good_source_by_channel,
+                source_channel_stats=source_channel_stats,
             )
         )
     return candidates
@@ -241,6 +259,8 @@ def download_http_bundle(
     retry_cooldown_minutes: int = 30,
     source_health: dict[str, dict[str, object]] | None = None,
     source_policies: dict[str, dict[str, object]] | None = None,
+    last_good_source_by_channel: dict[str, str] | None = None,
+    source_channel_stats: dict[str, dict[str, dict[str, int]]] | None = None,
 ) -> DiscoveryCandidate:
     cache_dir = discovery_cache_dir(cache_name)
     if cache_dir.exists():
@@ -303,6 +323,8 @@ def download_http_bundle(
         retry_cooldown_minutes=retry_cooldown_minutes,
         source_health=source_health,
         source_policies=source_policies,
+        last_good_source_by_channel=last_good_source_by_channel,
+        source_channel_stats=source_channel_stats,
     )
 
 
@@ -317,6 +339,8 @@ def select_latest_compatible(candidates: list[dict[str, object]]) -> tuple[int, 
         key=lambda item: (
             parse_version(str(item[1]["version"])),
             int(item[1].get("priority", 0)),
+            1 if item[1].get("preferred_source") else 0,
+            int(item[1].get("channel_success_rate", 0)),
             int(item[1].get("source_reputation", 50)),
             int(item[1].get("source_score", 100)),
             1 if item[1].get("ring") == "canary" else 0,

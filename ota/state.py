@@ -36,6 +36,8 @@ class DeviceStateStore:
             "source_events": [],
             "source_event_history_limit": 200,
             "source_policies": {},
+            "last_good_source_by_channel": {},
+            "source_channel_stats": {},
             "retention_keep_releases": 3,
             "update_state": "idle",
             "active_version": None,

@@ -165,6 +165,8 @@ def install_bundle_flow(
     bundle_dir: Path,
     root: Path,
     activate_command: str | None = DEFAULT_ACTIVATE_COMMAND,
+    selected_source: str | None = None,
+    selected_channel: str | None = None,
 ) -> dict[str, str | None]:
     release_layout = ReleaseLayout(root)
     state_store = STATE_STORE
@@ -197,11 +199,14 @@ def install_bundle_flow(
             "policy_rejected",
             version=manifest.version,
             error=policy_result.reason,
+            source=selected_source,
         )
+        if selected_source and selected_channel:
+            update_source_channel_result(selected_source, selected_channel, success=False)
         return state_store.load()
 
     state_store.update(candidate_version=manifest.version)
-    record_event(release_layout, "verified", version=manifest.version)
+    record_event(release_layout, "verified", version=manifest.version, source=selected_source)
 
     state_store.update(
         update_state=UpdateState.staging.value,
@@ -209,7 +214,7 @@ def install_bundle_flow(
     )
     stage_release(release_layout, manifest.version)
     copy_bundle_artifacts(release_layout, manifest.version, bundle_dir)
-    record_event(release_layout, "staged", version=manifest.version)
+    record_event(release_layout, "staged", version=manifest.version, source=selected_source)
 
     state_store.update(update_state=UpdateState.switching.value)
     promote_release(release_layout, manifest.version)
@@ -218,6 +223,7 @@ def install_bundle_flow(
         "promote",
         version=manifest.version,
         previous_version=previous_version(release_layout),
+        source=selected_source,
     )
 
     activated, activation_error = run_activation_hook(activate_command, root)
@@ -235,7 +241,10 @@ def install_bundle_flow(
             "activation_failed",
             version=manifest.version,
             error=activation_error,
+            source=selected_source,
         )
+        if selected_source and selected_channel:
+            update_source_channel_result(selected_source, selected_channel, success=False)
         rollback_target = previous_version(release_layout)
         if rollback_target:
             rolled_back_version = rollback_release(release_layout)
@@ -247,6 +256,7 @@ def install_bundle_flow(
                 version=manifest.version,
                 restored_version=rolled_back_version,
                 error=activation_error,
+                source=selected_source,
             )
         return state_store.load()
 
@@ -264,7 +274,9 @@ def install_bundle_flow(
             last_error=None,
             last_checked_at=utc_now(),
         )
-        record_event(release_layout, "health_check_passed", version=manifest.version)
+        record_event(release_layout, "health_check_passed", version=manifest.version, source=selected_source)
+        if selected_source and selected_channel:
+            update_source_channel_result(selected_source, selected_channel, success=True)
         failed_versions = state_store.load().get("failed_versions", {})
         failed_versions.pop(manifest.version, None)
         failure_counts = state_store.load().get("failure_counts", {})
@@ -273,7 +285,7 @@ def install_bundle_flow(
         return state_store.load()
 
     state_store.update(update_state=UpdateState.rollback.value, last_error=error, last_checked_at=utc_now())
-    record_event(release_layout, "health_check_failed", version=manifest.version, error=error)
+    record_event(release_layout, "health_check_failed", version=manifest.version, error=error, source=selected_source)
 
     rollback_target = previous_version(release_layout)
     if not rollback_target:
@@ -290,7 +302,10 @@ def install_bundle_flow(
             "rollback_unavailable",
             version=manifest.version,
             error=error,
+            source=selected_source,
         )
+        if selected_source and selected_channel:
+            update_source_channel_result(selected_source, selected_channel, success=False)
         failed_versions = state_store.load().get("failed_versions", {})
         failed_versions[manifest.version] = utc_now()
         failure_counts = state_store.load().get("failure_counts", {})
@@ -313,7 +328,10 @@ def install_bundle_flow(
         version=manifest.version,
         restored_version=rolled_back_version,
         error=error,
+        source=selected_source,
     )
+    if selected_source and selected_channel:
+        update_source_channel_result(selected_source, selected_channel, success=False)
     failed_versions = state_store.load().get("failed_versions", {})
     failed_versions[manifest.version] = utc_now()
     failure_counts = state_store.load().get("failure_counts", {})
@@ -345,6 +363,30 @@ def source_health() -> dict[str, dict[str, object]]:
 
 def source_events() -> list[dict[str, object]]:
     return cast(list[dict[str, object]], STATE_STORE.load().get("source_events", []))
+
+
+def last_good_source_by_channel() -> dict[str, str]:
+    return cast(dict[str, str], STATE_STORE.load().get("last_good_source_by_channel", {}))
+
+
+def source_channel_stats() -> dict[str, dict[str, dict[str, int]]]:
+    return cast(dict[str, dict[str, dict[str, int]]], STATE_STORE.load().get("source_channel_stats", {}))
+
+
+def update_source_channel_result(source: str, channel: str, success: bool) -> None:
+    stats = source_channel_stats()
+    source_stats = dict(stats.get(source, {}))
+    channel_stats = dict(source_stats.get(channel, {}))
+    key = "successes" if success else "failures"
+    channel_stats[key] = int(channel_stats.get(key, 0)) + 1
+    source_stats[channel] = channel_stats
+    stats[source] = source_stats
+    changes: dict[str, object] = {"source_channel_stats": stats}
+    if success:
+        preferred = last_good_source_by_channel()
+        preferred[channel] = source
+        changes["last_good_source_by_channel"] = preferred
+    STATE_STORE.update(**changes)
 
 
 def calculate_source_reputation(source: str, events: list[dict[str, object]]) -> int:
@@ -525,6 +567,8 @@ def discover_from_sources(
                     retry_cooldown_minutes=int(state.get("retry_cooldown_minutes", DEFAULT_RETRY_COOLDOWN_MINUTES)),
                     source_health=source_health(),
                     source_policies=cast(dict[str, dict[str, object]], state.get("source_policies", {})),
+                    last_good_source_by_channel=last_good_source_by_channel(),
+                    source_channel_stats=source_channel_stats(),
                 )
             )
             record_source_success(str(root_path))
@@ -551,6 +595,8 @@ def discover_from_sources(
                     retry_cooldown_minutes=int(state.get("retry_cooldown_minutes", DEFAULT_RETRY_COOLDOWN_MINUTES)),
                     source_health=source_health(),
                     source_policies=cast(dict[str, dict[str, object]], state.get("source_policies", {})),
+                    last_good_source_by_channel=last_good_source_by_channel(),
+                    source_channel_stats=source_channel_stats(),
                 )
             )
             record_source_success(http_source)
@@ -573,8 +619,15 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
     retry_cooldown_minutes = int(state.get("retry_cooldown_minutes", DEFAULT_RETRY_COOLDOWN_MINUTES))
     current_source_health = source_health()
     current_source_policies = cast(dict[str, dict[str, object]], state.get("source_policies", {}))
+    preferred_sources = cast(dict[str, str], state.get("last_good_source_by_channel", {}))
+    current_channel_stats = cast(dict[str, dict[str, dict[str, int]]], state.get("source_channel_stats", {}))
     for candidate in discovered_candidates():
         resolved_source_policy = resolve_source_policy(str(candidate["source"]), current_source_policies)
+        channel = str(candidate.get("channel", "stable"))
+        source_stats = (((current_channel_stats.get(str(candidate["source"]), {}) or {}).get(channel)) or {})
+        successes = int(source_stats.get("successes", 0))
+        failures = int(source_stats.get("failures", 0))
+        total_attempts = successes + failures
         refreshed_candidate = DiscoveryCandidate(
             source=str(candidate["source"]),
             source_type=str(candidate["source_type"]),
@@ -586,7 +639,7 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
             compatible=bool(candidate.get("compatible", True)),
             policy_reason=cast(str | None, candidate.get("policy_reason")),
             release_notes=cast(str | None, candidate.get("release_notes")),
-            channel=str(candidate.get("channel", "stable")),
+            channel=channel,
             ring=str(candidate.get("ring", "general")),
             priority=int(resolved_source_policy.get("priority_override", candidate.get("priority", 0))),
             approval_required=bool(candidate.get("approval_required", False)),
@@ -598,6 +651,12 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
                 current_source_health.get(str(candidate["source"]), {}).get("reputation", candidate.get("source_reputation", 50))
             ),
             source_policy=resolved_source_policy,
+            preferred_source=preferred_sources.get(channel) == str(candidate["source"]),
+            channel_success_rate=(
+                int((successes * 100) / total_attempts)
+                if total_attempts
+                else int(candidate.get("channel_success_rate", 0))
+            ),
         )
         if refreshed_candidate.channel not in allowed_channels:
             refreshed_candidate.selectable = False
@@ -957,6 +1016,8 @@ def install_discovered(
         bundle_dir=Path(candidate["bundle_dir"]),
         root=root,
         activate_command=activate_command,
+        selected_source=str(candidate["source"]),
+        selected_channel=str(candidate.get("channel", "stable")),
     )
     typer.echo(json.dumps(payload, indent=2))
 
@@ -986,6 +1047,8 @@ def install_latest(
         bundle_dir=Path(candidate["bundle_dir"]),
         root=root,
         activate_command=activate_command,
+        selected_source=str(candidate["source"]),
+        selected_channel=str(candidate.get("channel", "stable")),
     )
     typer.echo(json.dumps({"selected_index": payload["index"], "result": install_payload}, indent=2))
 
@@ -1021,6 +1084,8 @@ def poll_once(
         bundle_dir=Path(candidate["bundle_dir"]),
         root=root,
         activate_command=activate_command,
+        selected_source=str(candidate["source"]),
+        selected_channel=str(candidate.get("channel", "stable")),
     )
     typer.echo(json.dumps({"discovered": discovered, "selected_index": index, "result": result}, indent=2))
 

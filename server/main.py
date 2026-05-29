@@ -29,6 +29,8 @@ def source_health_metrics() -> dict[str, object]:
     now = datetime.now(timezone.utc)
     source_health = payload.get("source_health", {})
     source_events = payload.get("source_events", [])
+    last_good_sources = payload.get("last_good_source_by_channel", {})
+    channel_stats = payload.get("source_channel_stats", {})
     sources: list[dict[str, object]] = []
     skip_reasons: dict[str, int] = {}
     event_counts = {"success": 0, "failure": 0, "skip": 0}
@@ -61,6 +63,8 @@ def source_health_metrics() -> dict[str, object]:
             "backoff_sources": sum(1 for source in sources if source["backoff_active"]),
             "skip_reasons": skip_reasons,
             "event_counts": event_counts,
+            "last_good_source_by_channel": last_good_sources,
+            "source_channel_stats": channel_stats,
         },
     }
 
@@ -113,6 +117,8 @@ def policy_state() -> dict[str, object]:
         "source_quarantine_minutes": payload["source_quarantine_minutes"],
         "source_event_history_limit": payload["source_event_history_limit"],
         "source_policies": payload["source_policies"],
+        "last_good_source_by_channel": payload["last_good_source_by_channel"],
+        "source_channel_stats": payload["source_channel_stats"],
         "failure_counts": payload["failure_counts"],
         "source_health": payload["source_health"],
         "retention_keep_releases": payload["retention_keep_releases"],
