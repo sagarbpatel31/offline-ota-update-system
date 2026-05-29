@@ -88,6 +88,13 @@ python -m agent.main install-latest --activate-command "systemctl restart offlin
 
 Discovered candidates include compatibility flags and policy reasons. Incompatible bundles are rejected before staging.
 
+### Run unattended polling
+
+```bash
+python -m agent.main poll-once
+python -m agent.main poll-loop --interval-seconds 60
+```
+
 ### Inspect device status and update history
 
 ```bash
@@ -117,6 +124,16 @@ uvicorn demo_service.app:app --host 0.0.0.0 --port 8080
 export OFFLINE_OTA_ACTIVATE_COMMAND="systemctl restart offline-ota-demo.service"
 ```
 
+### Raspberry Pi bootstrap
+
+```bash
+chmod +x device/scripts/bootstrap_rpi.sh device/scripts/install_rpi_services.sh
+sudo device/scripts/bootstrap_rpi.sh
+sudo systemctl start offline-ota-demo.service offline-ota-dashboard.service offline-ota-agent.service
+```
+
+Edit `/etc/offline-ota/offline-ota.env` to set `OFFLINE_OTA_HTTP_SOURCES`, USB mount roots, and poll interval.
+
 ## Current Status
 
 This repository is scaffolded for MVP implementation. The current code provides:
@@ -130,6 +147,7 @@ This repository is scaffolded for MVP implementation. The current code provides:
 - USB and local HTTP bundle discovery with cached candidates
 - device-model, minimum-agent-version, and anti-downgrade policy checks
 - latest-compatible bundle selection with optional release notes metadata
+- Raspberry Pi polling loop and bootstrap scripts for unattended updates
 - starter FastAPI dashboard
 - starter agent CLI
 - systemd service skeleton
@@ -137,5 +155,5 @@ This repository is scaffolded for MVP implementation. The current code provides:
 ## Next Milestones
 
 - Add update audit log and dashboard views
-- Add Raspberry Pi USB mount automation and service integration
-- Add rollout policy and background polling
+- Add rollout policy and background scheduling
+- Add richer update attempt reporting in the dashboard

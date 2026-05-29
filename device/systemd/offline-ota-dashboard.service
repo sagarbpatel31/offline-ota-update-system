@@ -1,5 +1,5 @@
 [Unit]
-Description=Offline OTA Agent
+Description=Offline OTA Dashboard
 After=network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/offline-ota
 EnvironmentFile=-/etc/offline-ota/offline-ota.env
-ExecStart=/usr/bin/python3 -m agent.main poll-loop
+ExecStart=/usr/bin/python3 -m uvicorn server.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
 

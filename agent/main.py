@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import time
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -45,6 +46,9 @@ STATE_FILE = Path("artifacts/device-state.txt")
 LAYOUT = ReleaseLayout(Path("artifacts/device"))
 STATE_STORE = DeviceStateStore(Path("artifacts/device-state.json"))
 DEFAULT_ACTIVATE_COMMAND = os.getenv("OFFLINE_OTA_ACTIVATE_COMMAND")
+DEFAULT_USB_MOUNT_ROOTS = os.getenv("OFFLINE_OTA_USB_MOUNT_ROOTS", "/media,/mnt").split(",")
+DEFAULT_HTTP_SOURCES = [value for value in os.getenv("OFFLINE_OTA_HTTP_SOURCES", "").split(",") if value]
+DEFAULT_POLL_INTERVAL_SECONDS = int(os.getenv("OFFLINE_OTA_POLL_INTERVAL_SECONDS", "60"))
 
 
 def read_state() -> str:
@@ -303,6 +307,27 @@ def selected_candidate_payload() -> dict[str, object] | None:
     return {"index": index, "candidate": candidate}
 
 
+def discover_from_sources(
+    usb_mount_roots: list[str] | None = None,
+    http_sources: list[str] | None = None,
+) -> list[dict[str, object]]:
+    STATE_STORE.update(update_state=UpdateState.discovering.value, last_error=None, last_checked_at=utc_now())
+    candidates: list[DiscoveryCandidate] = []
+
+    for mount_root in usb_mount_roots or DEFAULT_USB_MOUNT_ROOTS:
+        root_path = Path(mount_root).expanduser()
+        if root_path.exists():
+            candidates.extend(discover_usb_candidates(root_path, policy_context=policy_context()))
+
+    for http_source in http_sources or DEFAULT_HTTP_SOURCES:
+        try:
+            candidates.append(download_http_bundle(http_source, cache_name=f"http-{len(candidates)}", policy_context=policy_context()))
+        except Exception as error:
+            STATE_STORE.update(last_error=str(error))
+
+    return save_discovered_candidates(candidates)
+
+
 @app.command()
 def verify(
     bundle_path: Path = Path("manifests/signed-bundle.json"),
@@ -356,9 +381,7 @@ def install(
 def discover_usb(
     mount_root: Path = Path("/media"),
 ) -> None:
-    STATE_STORE.update(update_state=UpdateState.discovering.value, last_error=None, last_checked_at=utc_now())
-    candidates = discover_usb_candidates(mount_root, policy_context=policy_context())
-    payload = save_discovered_candidates(candidates)
+    payload = discover_from_sources(usb_mount_roots=[str(mount_root)], http_sources=[])
     typer.echo(json.dumps(payload, indent=2))
 
 
@@ -366,9 +389,7 @@ def discover_usb(
 def discover_http(
     base_url: str,
 ) -> None:
-    STATE_STORE.update(update_state=UpdateState.discovering.value, last_error=None, last_checked_at=utc_now())
-    candidate = download_http_bundle(base_url, policy_context=policy_context())
-    payload = save_discovered_candidates([candidate])
+    payload = discover_from_sources(usb_mount_roots=[], http_sources=[base_url])
     typer.echo(json.dumps(payload, indent=2))
 
 
@@ -433,6 +454,58 @@ def install_latest(
         activate_command=activate_command,
     )
     typer.echo(json.dumps({"selected_index": payload["index"], "result": install_payload}, indent=2))
+
+
+@app.command("poll-once")
+def poll_once(
+    usb_mount_roots: list[str] | None = None,
+    http_sources: list[str] | None = None,
+    root: Path = LAYOUT.root,
+    activate_command: str | None = DEFAULT_ACTIVATE_COMMAND,
+) -> None:
+    discovered = discover_from_sources(usb_mount_roots=usb_mount_roots, http_sources=http_sources)
+    selection = select_latest_compatible(discovered)
+    if not selection:
+        typer.echo(json.dumps({"discovered": discovered, "selected": None}, indent=2))
+        return
+
+    index, candidate = selection
+    public_key = candidate.get("public_key_path")
+    if not public_key:
+        raise typer.BadParameter("selected bundle is missing a public key path")
+
+    result = install_bundle_flow(
+        bundle_path=Path(candidate["bundle_path"]),
+        public_key=Path(public_key),
+        bundle_dir=Path(candidate["bundle_dir"]),
+        root=root,
+        activate_command=activate_command,
+    )
+    typer.echo(json.dumps({"discovered": discovered, "selected_index": index, "result": result}, indent=2))
+
+
+@app.command("poll-loop")
+def poll_loop(
+    interval_seconds: int = DEFAULT_POLL_INTERVAL_SECONDS,
+    usb_mount_roots: list[str] | None = None,
+    http_sources: list[str] | None = None,
+    root: Path = LAYOUT.root,
+    activate_command: str | None = DEFAULT_ACTIVATE_COMMAND,
+) -> None:
+    while True:
+        try:
+            poll_once(
+                usb_mount_roots=usb_mount_roots,
+                http_sources=http_sources,
+                root=root,
+                activate_command=activate_command,
+            )
+        except KeyboardInterrupt:
+            raise
+        except Exception as error:
+            STATE_STORE.update(update_state=UpdateState.failed.value, last_error=str(error), last_checked_at=utc_now())
+            typer.echo(json.dumps({"error": str(error)}, indent=2))
+        time.sleep(interval_seconds)
 
 
 @app.command()
