@@ -15,7 +15,7 @@ import typer
 from ota.bundle import BundleManifest, VerifiedBundle, load_signed_manifest, sha256_file
 from ota.crypto import verify_manifest_signature
 from ota.discovery import DiscoveryCandidate, discover_usb_candidates, download_http_bundle, select_latest_compatible
-from ota.policy import cooldown_active, evaluate_manifest_policy, within_maintenance_window
+from ota.policy import adaptive_cooldown_minutes, cooldown_active, evaluate_manifest_policy, within_maintenance_window
 from ota.release import (
     ReleaseLayout,
     active_version,
@@ -255,7 +255,9 @@ def install_bundle_flow(
         record_event(release_layout, "health_check_passed", version=manifest.version)
         failed_versions = state_store.load().get("failed_versions", {})
         failed_versions.pop(manifest.version, None)
-        state_store.update(failed_versions=failed_versions)
+        failure_counts = state_store.load().get("failure_counts", {})
+        failure_counts.pop(manifest.version, None)
+        state_store.update(failed_versions=failed_versions, failure_counts=failure_counts)
         return state_store.load()
 
     state_store.update(update_state=UpdateState.rollback.value, last_error=error, last_checked_at=utc_now())
@@ -279,7 +281,9 @@ def install_bundle_flow(
         )
         failed_versions = state_store.load().get("failed_versions", {})
         failed_versions[manifest.version] = utc_now()
-        state_store.update(failed_versions=failed_versions)
+        failure_counts = state_store.load().get("failure_counts", {})
+        failure_counts[manifest.version] = int(failure_counts.get(manifest.version, 0)) + 1
+        state_store.update(failed_versions=failed_versions, failure_counts=failure_counts)
         return state_store.load()
 
     rolled_back_version = rollback_release(release_layout)
@@ -300,7 +304,9 @@ def install_bundle_flow(
     )
     failed_versions = state_store.load().get("failed_versions", {})
     failed_versions[manifest.version] = utc_now()
-    state_store.update(failed_versions=failed_versions)
+    failure_counts = state_store.load().get("failure_counts", {})
+    failure_counts[manifest.version] = int(failure_counts.get(manifest.version, 0)) + 1
+    state_store.update(failed_versions=failed_versions, failure_counts=failure_counts)
     return state_store.load()
 
 
@@ -319,6 +325,40 @@ def approved_updates() -> set[str]:
 
 def approval_key(candidate: dict[str, object]) -> str:
     return f"{candidate['source']}|{candidate['version']}"
+
+
+def source_health() -> dict[str, dict[str, object]]:
+    return cast(dict[str, dict[str, object]], STATE_STORE.load().get("source_health", {}))
+
+
+def record_source_success(source: str) -> None:
+    health = source_health()
+    current = health.get(source, {"score": 100, "successes": 0, "failures": 0, "last_error": None})
+    current["score"] = min(100, int(current.get("score", 100)) + 5)
+    current["successes"] = int(current.get("successes", 0)) + 1
+    current["last_error"] = None
+    current["last_seen_at"] = utc_now()
+    health[source] = current
+    STATE_STORE.update(source_health=health)
+
+
+def record_source_failure(source: str, error: str) -> None:
+    health = source_health()
+    current = health.get(source, {"score": 100, "successes": 0, "failures": 0, "last_error": None})
+    current["score"] = max(0, int(current.get("score", 100)) - 20)
+    current["failures"] = int(current.get("failures", 0)) + 1
+    current["last_error"] = error
+    current["last_seen_at"] = utc_now()
+    health[source] = current
+    STATE_STORE.update(source_health=health, last_error=error)
+
+
+def cooldown_minutes_for_state(state: dict[str, object], version: str) -> int:
+    failure_count = int(cast(dict[str, int], state.get("failure_counts", {})).get(version, 0))
+    return adaptive_cooldown_minutes(
+        base_minutes=int(state.get("retry_cooldown_minutes", DEFAULT_RETRY_COOLDOWN_MINUTES)),
+        failure_count=failure_count,
+    )
 
 
 def save_discovered_candidates(candidates: list[DiscoveryCandidate]) -> list[dict[str, object]]:
@@ -361,9 +401,12 @@ def discover_from_sources(
                     maintenance_window_end=cast(str | None, state.get("maintenance_window_end")),
                     trusted_sources=cast(list[str], state.get("trusted_usb_roots", [])),
                     failed_versions=cast(dict[str, str], state.get("failed_versions", {})),
+                    failure_counts=cast(dict[str, int], state.get("failure_counts", {})),
                     retry_cooldown_minutes=int(state.get("retry_cooldown_minutes", DEFAULT_RETRY_COOLDOWN_MINUTES)),
+                    source_health=source_health(),
                 )
             )
+            record_source_success(str(root_path))
 
     for http_source in DEFAULT_HTTP_SOURCES if http_sources is None else http_sources:
         try:
@@ -379,11 +422,14 @@ def discover_from_sources(
                     maintenance_window_end=cast(str | None, state.get("maintenance_window_end")),
                     trusted_sources=cast(list[str], state.get("trusted_http_sources", [])),
                     failed_versions=cast(dict[str, str], state.get("failed_versions", {})),
+                    failure_counts=cast(dict[str, int], state.get("failure_counts", {})),
                     retry_cooldown_minutes=int(state.get("retry_cooldown_minutes", DEFAULT_RETRY_COOLDOWN_MINUTES)),
+                    source_health=source_health(),
                 )
             )
+            record_source_success(http_source)
         except Exception as error:
-            STATE_STORE.update(last_error=str(error))
+            record_source_failure(http_source, str(error))
 
     return save_discovered_candidates(candidates)
 
@@ -397,7 +443,9 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
     trusted_http_sources = cast(list[str], state.get("trusted_http_sources", []))
     trusted_usb_roots = cast(list[str], state.get("trusted_usb_roots", []))
     failed_versions = cast(dict[str, str], state.get("failed_versions", {}))
+    failure_counts = cast(dict[str, int], state.get("failure_counts", {}))
     retry_cooldown_minutes = int(state.get("retry_cooldown_minutes", DEFAULT_RETRY_COOLDOWN_MINUTES))
+    current_source_health = source_health()
     for candidate in discovered_candidates():
         refreshed_candidate = DiscoveryCandidate(
             source=str(candidate["source"]),
@@ -417,6 +465,7 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
             approved=approval_key(candidate) in approvals or not bool(candidate.get("approval_required", False)),
             selectable=bool(candidate.get("compatible", True)),
             selection_reason=cast(str | None, candidate.get("policy_reason")),
+            source_score=int(current_source_health.get(str(candidate["source"]), {}).get("score", candidate.get("source_score", 100))),
         )
         if refreshed_candidate.channel not in allowed_channels:
             refreshed_candidate.selectable = False
@@ -448,7 +497,10 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
         elif cooldown_active(
             version=refreshed_candidate.version,
             failed_versions=failed_versions,
-            cooldown_minutes=retry_cooldown_minutes,
+            cooldown_minutes=adaptive_cooldown_minutes(
+                base_minutes=retry_cooldown_minutes,
+                failure_count=int(failure_counts.get(refreshed_candidate.version, 0)),
+            ),
             now=datetime.now(),
         ):
             refreshed_candidate.selectable = False

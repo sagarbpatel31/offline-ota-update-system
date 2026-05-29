@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from ota.discovery import select_latest_compatible
-from ota.policy import cooldown_active, source_is_trusted, within_maintenance_window
+from ota.policy import adaptive_cooldown_minutes, cooldown_active, source_is_trusted, within_maintenance_window
 from ota.release import ReleaseLayout, prune_old_releases
 
 
@@ -111,6 +111,12 @@ class RolloutPolicyTests(unittest.TestCase):
                 now=datetime(2026, 1, 1, 0, 10),
             )
         )
+
+    def test_adaptive_cooldown_minutes_scales_and_caps(self) -> None:
+        self.assertEqual(adaptive_cooldown_minutes(base_minutes=30, failure_count=1), 30)
+        self.assertEqual(adaptive_cooldown_minutes(base_minutes=30, failure_count=2), 60)
+        self.assertEqual(adaptive_cooldown_minutes(base_minutes=30, failure_count=3), 120)
+        self.assertEqual(adaptive_cooldown_minutes(base_minutes=60, failure_count=10), 24 * 60)
         self.assertFalse(
             cooldown_active(
                 version="1.0.0",

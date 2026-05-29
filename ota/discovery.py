@@ -38,6 +38,7 @@ class DiscoveryCandidate:
     approved: bool = True
     selectable: bool = True
     selection_reason: str | None = None
+    source_score: int = 100
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -58,6 +59,7 @@ class DiscoveryCandidate:
             "approved": self.approved,
             "selectable": self.selectable,
             "selection_reason": self.selection_reason,
+            "source_score": self.source_score,
         }
 
 
@@ -89,7 +91,9 @@ def load_candidate(
     maintenance_window_end: str | None = None,
     trusted_sources: list[str] | None = None,
     failed_versions: dict[str, str] | None = None,
+    failure_counts: dict[str, int] | None = None,
     retry_cooldown_minutes: int = 30,
+    source_health: dict[str, dict[str, object]] | None = None,
 ) -> DiscoveryCandidate:
     envelope = load_signed_manifest(bundle_path)
     manifest = envelope.manifest
@@ -100,6 +104,8 @@ def load_candidate(
     approval_required = bool(bundle_index.get("requires_approval", False))
     approval_key = f"{source}|{manifest.version}"
     approved = (not approval_required) or (approved_updates is not None and approval_key in approved_updates)
+    failure_count = (failure_counts or {}).get(manifest.version, 0)
+    source_score = int((source_health or {}).get(source, {}).get("score", 100))
     allowed_channels = {"stable"} if rollout_channel == "stable" else {"stable", "canary"}
     allowed_rings = {"general"} if rollout_ring == "general" else {"general", rollout_ring}
     selection_reason = None
@@ -152,6 +158,7 @@ def load_candidate(
         approved=approved,
         selectable=selectable,
         selection_reason=selection_reason,
+        source_score=source_score,
     )
 
 
@@ -166,7 +173,9 @@ def discover_usb_candidates(
     maintenance_window_end: str | None = None,
     trusted_sources: list[str] | None = None,
     failed_versions: dict[str, str] | None = None,
+    failure_counts: dict[str, int] | None = None,
     retry_cooldown_minutes: int = 30,
+    source_health: dict[str, dict[str, object]] | None = None,
 ) -> list[DiscoveryCandidate]:
     candidates: list[DiscoveryCandidate] = []
     for bundle_path in sorted(mount_root.rglob("signed-bundle.json")):
@@ -196,7 +205,9 @@ def discover_usb_candidates(
                 maintenance_window_end=maintenance_window_end,
                 trusted_sources=trusted_sources,
                 failed_versions=failed_versions,
+                failure_counts=failure_counts,
                 retry_cooldown_minutes=retry_cooldown_minutes,
+                source_health=source_health,
             )
         )
     return candidates
@@ -214,7 +225,9 @@ def download_http_bundle(
     maintenance_window_end: str | None = None,
     trusted_sources: list[str] | None = None,
     failed_versions: dict[str, str] | None = None,
+    failure_counts: dict[str, int] | None = None,
     retry_cooldown_minutes: int = 30,
+    source_health: dict[str, dict[str, object]] | None = None,
 ) -> DiscoveryCandidate:
     cache_dir = discovery_cache_dir(cache_name)
     if cache_dir.exists():
@@ -273,7 +286,9 @@ def download_http_bundle(
         maintenance_window_end=maintenance_window_end,
         trusted_sources=trusted_sources,
         failed_versions=failed_versions,
+        failure_counts=failure_counts,
         retry_cooldown_minutes=retry_cooldown_minutes,
+        source_health=source_health,
     )
 
 
@@ -288,6 +303,7 @@ def select_latest_compatible(candidates: list[dict[str, object]]) -> tuple[int, 
         key=lambda item: (
             parse_version(str(item[1]["version"])),
             int(item[1].get("priority", 0)),
+            int(item[1].get("source_score", 100)),
             1 if item[1].get("ring") == "canary" else 0,
             1 if item[1].get("channel") == "canary" else 0,
             1 if item[1].get("source_type") == "http" else 0,

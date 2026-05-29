@@ -48,6 +48,8 @@ def policy_state() -> dict[str, object]:
         "trusted_http_sources": payload["trusted_http_sources"],
         "trusted_usb_roots": payload["trusted_usb_roots"],
         "retry_cooldown_minutes": payload["retry_cooldown_minutes"],
+        "failure_counts": payload["failure_counts"],
+        "source_health": payload["source_health"],
         "retention_keep_releases": payload["retention_keep_releases"],
         "failed_versions": payload["failed_versions"],
         "approved_updates": payload["approved_updates"],

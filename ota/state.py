@@ -28,6 +28,8 @@ class DeviceStateStore:
             "trusted_usb_roots": [],
             "retry_cooldown_minutes": 30,
             "failed_versions": {},
+            "failure_counts": {},
+            "source_health": {},
             "retention_keep_releases": 3,
             "update_state": "idle",
             "active_version": None,

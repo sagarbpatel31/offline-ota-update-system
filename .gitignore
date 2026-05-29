@@ -9,4 +9,5 @@ artifacts/
 *.pyc
 *.pyo
 *.swp
-
+AGENTS.md
+applications/

@@ -77,6 +77,16 @@ def cooldown_active(
     return comparison_now < timestamp + timedelta(minutes=cooldown_minutes)
 
 
+def adaptive_cooldown_minutes(
+    *,
+    base_minutes: int,
+    failure_count: int,
+    max_minutes: int = 24 * 60,
+) -> int:
+    scaled = base_minutes * (2 ** max(failure_count - 1, 0))
+    return min(scaled, max_minutes)
+
+
 def evaluate_manifest_policy(
     manifest: BundleManifest,
     *,
