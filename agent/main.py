@@ -18,7 +18,9 @@ from ota.discovery import DiscoveryCandidate, discover_usb_candidates, download_
 from ota.policy import (
     adaptive_cooldown_minutes,
     adaptive_source_backoff_minutes,
+    affinity_active,
     cooldown_active,
+    decayed_channel_success_rate,
     evaluate_manifest_policy,
     poll_interval_active,
     resolve_source_policy,
@@ -75,6 +77,9 @@ DEFAULT_RETRY_COOLDOWN_MINUTES = int(os.getenv("OFFLINE_OTA_RETRY_COOLDOWN_MINUT
 DEFAULT_SOURCE_BACKOFF_BASE_MINUTES = int(os.getenv("OFFLINE_OTA_SOURCE_BACKOFF_BASE_MINUTES", "5"))
 DEFAULT_SOURCE_QUARANTINE_THRESHOLD = int(os.getenv("OFFLINE_OTA_SOURCE_QUARANTINE_THRESHOLD", "3"))
 DEFAULT_SOURCE_QUARANTINE_MINUTES = int(os.getenv("OFFLINE_OTA_SOURCE_QUARANTINE_MINUTES", "60"))
+DEFAULT_SOURCE_AFFINITY_TTL_HOURS = int(os.getenv("OFFLINE_OTA_SOURCE_AFFINITY_TTL_HOURS", "72"))
+DEFAULT_SOURCE_CHANNEL_DECAY_THRESHOLD = int(os.getenv("OFFLINE_OTA_SOURCE_CHANNEL_DECAY_THRESHOLD", "3"))
+DEFAULT_SOURCE_CHANNEL_DECAY_PENALTY = int(os.getenv("OFFLINE_OTA_SOURCE_CHANNEL_DECAY_PENALTY", "20"))
 DEFAULT_RETENTION_KEEP_RELEASES = int(os.getenv("OFFLINE_OTA_RETENTION_KEEP_RELEASES", "3"))
 
 
@@ -365,8 +370,8 @@ def source_events() -> list[dict[str, object]]:
     return cast(list[dict[str, object]], STATE_STORE.load().get("source_events", []))
 
 
-def last_good_source_by_channel() -> dict[str, str]:
-    return cast(dict[str, str], STATE_STORE.load().get("last_good_source_by_channel", {}))
+def last_good_source_by_channel() -> dict[str, object]:
+    return cast(dict[str, object], STATE_STORE.load().get("last_good_source_by_channel", {}))
 
 
 def source_channel_stats() -> dict[str, dict[str, dict[str, int]]]:
@@ -379,12 +384,16 @@ def update_source_channel_result(source: str, channel: str, success: bool) -> No
     channel_stats = dict(source_stats.get(channel, {}))
     key = "successes" if success else "failures"
     channel_stats[key] = int(channel_stats.get(key, 0)) + 1
+    if success:
+        channel_stats["last_success_at"] = utc_now()
+    else:
+        channel_stats["last_failure_at"] = utc_now()
     source_stats[channel] = channel_stats
     stats[source] = source_stats
     changes: dict[str, object] = {"source_channel_stats": stats}
     if success:
         preferred = last_good_source_by_channel()
-        preferred[channel] = source
+        preferred[channel] = {"source": source, "last_success_at": utc_now()}
         changes["last_good_source_by_channel"] = preferred
     STATE_STORE.update(**changes)
 
@@ -569,6 +578,9 @@ def discover_from_sources(
                     source_policies=cast(dict[str, dict[str, object]], state.get("source_policies", {})),
                     last_good_source_by_channel=last_good_source_by_channel(),
                     source_channel_stats=source_channel_stats(),
+                    source_affinity_ttl_hours=int(state.get("source_affinity_ttl_hours", DEFAULT_SOURCE_AFFINITY_TTL_HOURS)),
+                    source_channel_decay_threshold=int(state.get("source_channel_decay_threshold", DEFAULT_SOURCE_CHANNEL_DECAY_THRESHOLD)),
+                    source_channel_decay_penalty=int(state.get("source_channel_decay_penalty", DEFAULT_SOURCE_CHANNEL_DECAY_PENALTY)),
                 )
             )
             record_source_success(str(root_path))
@@ -597,6 +609,9 @@ def discover_from_sources(
                     source_policies=cast(dict[str, dict[str, object]], state.get("source_policies", {})),
                     last_good_source_by_channel=last_good_source_by_channel(),
                     source_channel_stats=source_channel_stats(),
+                    source_affinity_ttl_hours=int(state.get("source_affinity_ttl_hours", DEFAULT_SOURCE_AFFINITY_TTL_HOURS)),
+                    source_channel_decay_threshold=int(state.get("source_channel_decay_threshold", DEFAULT_SOURCE_CHANNEL_DECAY_THRESHOLD)),
+                    source_channel_decay_penalty=int(state.get("source_channel_decay_penalty", DEFAULT_SOURCE_CHANNEL_DECAY_PENALTY)),
                 )
             )
             record_source_success(http_source)
@@ -619,15 +634,30 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
     retry_cooldown_minutes = int(state.get("retry_cooldown_minutes", DEFAULT_RETRY_COOLDOWN_MINUTES))
     current_source_health = source_health()
     current_source_policies = cast(dict[str, dict[str, object]], state.get("source_policies", {}))
-    preferred_sources = cast(dict[str, str], state.get("last_good_source_by_channel", {}))
+    preferred_sources = cast(dict[str, object], state.get("last_good_source_by_channel", {}))
     current_channel_stats = cast(dict[str, dict[str, dict[str, int]]], state.get("source_channel_stats", {}))
+    affinity_ttl_hours = int(state.get("source_affinity_ttl_hours", DEFAULT_SOURCE_AFFINITY_TTL_HOURS))
+    decay_threshold = int(state.get("source_channel_decay_threshold", DEFAULT_SOURCE_CHANNEL_DECAY_THRESHOLD))
+    decay_penalty = int(state.get("source_channel_decay_penalty", DEFAULT_SOURCE_CHANNEL_DECAY_PENALTY))
     for candidate in discovered_candidates():
         resolved_source_policy = resolve_source_policy(str(candidate["source"]), current_source_policies)
         channel = str(candidate.get("channel", "stable"))
         source_stats = (((current_channel_stats.get(str(candidate["source"]), {}) or {}).get(channel)) or {})
         successes = int(source_stats.get("successes", 0))
         failures = int(source_stats.get("failures", 0))
-        total_attempts = successes + failures
+        last_good_entry = preferred_sources.get(channel)
+        preferred_source = False
+        if isinstance(last_good_entry, str):
+            preferred_source = last_good_entry == str(candidate["source"])
+        elif isinstance(last_good_entry, dict):
+            preferred_source = (
+                last_good_entry.get("source") == str(candidate["source"])
+                and affinity_active(
+                    last_success_at=cast(str | None, last_good_entry.get("last_success_at")),
+                    ttl_hours=affinity_ttl_hours,
+                    now=datetime.now(),
+                )
+            )
         refreshed_candidate = DiscoveryCandidate(
             source=str(candidate["source"]),
             source_type=str(candidate["source_type"]),
@@ -651,12 +681,15 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
                 current_source_health.get(str(candidate["source"]), {}).get("reputation", candidate.get("source_reputation", 50))
             ),
             source_policy=resolved_source_policy,
-            preferred_source=preferred_sources.get(channel) == str(candidate["source"]),
-            channel_success_rate=(
-                int((successes * 100) / total_attempts)
-                if total_attempts
-                else int(candidate.get("channel_success_rate", 0))
-            ),
+            preferred_source=preferred_source,
+            channel_success_rate=decayed_channel_success_rate(
+                successes=successes,
+                failures=failures,
+                last_failure_at=cast(str | None, source_stats.get("last_failure_at")),
+                decay_threshold=decay_threshold,
+                decay_penalty=decay_penalty,
+                now=datetime.now(),
+            ) if (successes + failures) else int(candidate.get("channel_success_rate", 0)),
         )
         if refreshed_candidate.channel not in allowed_channels:
             refreshed_candidate.selectable = False
@@ -742,6 +775,9 @@ def init_layout(root: Path = LAYOUT.root) -> None:
     payload["source_quarantine_threshold"] = payload.get("source_quarantine_threshold") or DEFAULT_SOURCE_QUARANTINE_THRESHOLD
     payload["source_quarantine_minutes"] = payload.get("source_quarantine_minutes") or DEFAULT_SOURCE_QUARANTINE_MINUTES
     payload["source_policies"] = payload.get("source_policies") or {}
+    payload["source_affinity_ttl_hours"] = payload.get("source_affinity_ttl_hours") or DEFAULT_SOURCE_AFFINITY_TTL_HOURS
+    payload["source_channel_decay_threshold"] = payload.get("source_channel_decay_threshold") or DEFAULT_SOURCE_CHANNEL_DECAY_THRESHOLD
+    payload["source_channel_decay_penalty"] = payload.get("source_channel_decay_penalty") or DEFAULT_SOURCE_CHANNEL_DECAY_PENALTY
     payload["retention_keep_releases"] = payload.get("retention_keep_releases") or DEFAULT_RETENTION_KEEP_RELEASES
     STATE_STORE.save(payload)
     typer.echo(f"initialized release layout at {root}")
@@ -896,6 +932,27 @@ def clear_source_policy(source_prefix: str) -> None:
 @app.command("list-source-policies")
 def list_source_policies() -> None:
     typer.echo(json.dumps(STATE_STORE.load().get("source_policies", {}), indent=2))
+
+
+@app.command("set-source-affinity")
+def set_source_affinity(ttl_hours: int, decay_threshold: int, decay_penalty: int) -> None:
+    STATE_STORE.update(
+        source_affinity_ttl_hours=ttl_hours,
+        source_channel_decay_threshold=decay_threshold,
+        source_channel_decay_penalty=decay_penalty,
+    )
+    record_event(LAYOUT, "source_affinity_policy_changed", version=f"{ttl_hours}:{decay_threshold}:{decay_penalty}")
+    typer.echo(
+        json.dumps(
+            {
+                "source_affinity_ttl_hours": ttl_hours,
+                "source_channel_decay_threshold": decay_threshold,
+                "source_channel_decay_penalty": decay_penalty,
+                "discovered": refresh_cached_candidate_flags(),
+            },
+            indent=2,
+        )
+    )
 
 
 @app.command("set-retry-cooldown")

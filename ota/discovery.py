@@ -10,6 +10,8 @@ from urllib.request import urlopen
 
 from ota.bundle import SignedManifestEnvelope, load_signed_manifest
 from ota.policy import (
+    affinity_active,
+    decayed_channel_success_rate,
     PolicyResult,
     cooldown_active,
     evaluate_manifest_policy,
@@ -106,6 +108,9 @@ def load_candidate(
     source_policies: dict[str, dict[str, object]] | None = None,
     last_good_source_by_channel: dict[str, str] | None = None,
     source_channel_stats: dict[str, dict[str, dict[str, int]]] | None = None,
+    source_affinity_ttl_hours: int = 72,
+    source_channel_decay_threshold: int = 3,
+    source_channel_decay_penalty: int = 20,
 ) -> DiscoveryCandidate:
     envelope = load_signed_manifest(bundle_path)
     manifest = envelope.manifest
@@ -120,12 +125,30 @@ def load_candidate(
     failure_count = (failure_counts or {}).get(manifest.version, 0)
     source_score = int((source_health or {}).get(source, {}).get("score", 100))
     source_reputation = int((source_health or {}).get(source, {}).get("reputation", 50))
-    preferred_source = (last_good_source_by_channel or {}).get(channel) == source
+    last_good_entry = (last_good_source_by_channel or {}).get(channel)
+    preferred_source = False
+    if isinstance(last_good_entry, str):
+        preferred_source = last_good_entry == source
+    elif isinstance(last_good_entry, dict):
+        preferred_source = (
+            last_good_entry.get("source") == source
+            and affinity_active(
+                last_success_at=str(last_good_entry.get("last_success_at")) if last_good_entry.get("last_success_at") else None,
+                ttl_hours=source_affinity_ttl_hours,
+                now=datetime.now(),
+            )
+        )
     channel_stats = (((source_channel_stats or {}).get(source) or {}).get(channel) or {})
     successes = int(channel_stats.get("successes", 0))
     failures = int(channel_stats.get("failures", 0))
-    total_attempts = successes + failures
-    channel_success_rate = int((successes * 100) / total_attempts) if total_attempts else 0
+    channel_success_rate = decayed_channel_success_rate(
+        successes=successes,
+        failures=failures,
+        last_failure_at=str(channel_stats.get("last_failure_at")) if channel_stats.get("last_failure_at") else None,
+        decay_threshold=source_channel_decay_threshold,
+        decay_penalty=source_channel_decay_penalty,
+        now=datetime.now(),
+    )
     allowed_channels = {"stable"} if rollout_channel == "stable" else {"stable", "canary"}
     allowed_rings = {"general"} if rollout_ring == "general" else {"general", rollout_ring}
     selection_reason = None
@@ -203,6 +226,9 @@ def discover_usb_candidates(
     source_policies: dict[str, dict[str, object]] | None = None,
     last_good_source_by_channel: dict[str, str] | None = None,
     source_channel_stats: dict[str, dict[str, dict[str, int]]] | None = None,
+    source_affinity_ttl_hours: int = 72,
+    source_channel_decay_threshold: int = 3,
+    source_channel_decay_penalty: int = 20,
 ) -> list[DiscoveryCandidate]:
     candidates: list[DiscoveryCandidate] = []
     for bundle_path in sorted(mount_root.rglob("signed-bundle.json")):
@@ -238,6 +264,9 @@ def discover_usb_candidates(
                 source_policies=source_policies,
                 last_good_source_by_channel=last_good_source_by_channel,
                 source_channel_stats=source_channel_stats,
+                source_affinity_ttl_hours=source_affinity_ttl_hours,
+                source_channel_decay_threshold=source_channel_decay_threshold,
+                source_channel_decay_penalty=source_channel_decay_penalty,
             )
         )
     return candidates
@@ -261,6 +290,9 @@ def download_http_bundle(
     source_policies: dict[str, dict[str, object]] | None = None,
     last_good_source_by_channel: dict[str, str] | None = None,
     source_channel_stats: dict[str, dict[str, dict[str, int]]] | None = None,
+    source_affinity_ttl_hours: int = 72,
+    source_channel_decay_threshold: int = 3,
+    source_channel_decay_penalty: int = 20,
 ) -> DiscoveryCandidate:
     cache_dir = discovery_cache_dir(cache_name)
     if cache_dir.exists():
@@ -325,6 +357,9 @@ def download_http_bundle(
         source_policies=source_policies,
         last_good_source_by_channel=last_good_source_by_channel,
         source_channel_stats=source_channel_stats,
+        source_affinity_ttl_hours=source_affinity_ttl_hours,
+        source_channel_decay_threshold=source_channel_decay_threshold,
+        source_channel_decay_penalty=source_channel_decay_penalty,
     )
 
 

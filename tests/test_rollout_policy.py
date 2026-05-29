@@ -7,7 +7,9 @@ from ota.discovery import select_latest_compatible
 from ota.policy import (
     adaptive_cooldown_minutes,
     adaptive_source_backoff_minutes,
+    affinity_active,
     cooldown_active,
+    decayed_channel_success_rate,
     poll_interval_active,
     resolve_source_policy,
     source_backoff_active,
@@ -286,6 +288,46 @@ class RolloutPolicyTests(unittest.TestCase):
                 poll_interval_minutes=15,
                 now=datetime(2026, 1, 1, 0, 20),
             )
+        )
+
+    def test_affinity_active(self) -> None:
+        self.assertTrue(
+            affinity_active(
+                last_success_at="2026-01-01T00:00:00+00:00",
+                ttl_hours=72,
+                now=datetime(2026, 1, 2, 0, 0),
+            )
+        )
+        self.assertFalse(
+            affinity_active(
+                last_success_at="2026-01-01T00:00:00+00:00",
+                ttl_hours=24,
+                now=datetime(2026, 1, 3, 0, 1),
+            )
+        )
+
+    def test_decayed_channel_success_rate_penalizes_recent_failures(self) -> None:
+        self.assertEqual(
+            decayed_channel_success_rate(
+                successes=8,
+                failures=3,
+                last_failure_at="2026-01-01T12:00:00+00:00",
+                decay_threshold=3,
+                decay_penalty=20,
+                now=datetime(2026, 1, 2, 0, 0),
+            ),
+            52,
+        )
+        self.assertEqual(
+            decayed_channel_success_rate(
+                successes=8,
+                failures=2,
+                last_failure_at="2026-01-01T12:00:00+00:00",
+                decay_threshold=3,
+                decay_penalty=20,
+                now=datetime(2026, 1, 2, 0, 0),
+            ),
+            80,
         )
 
     def test_prune_old_releases_keeps_active_previous_and_limit(self) -> None:

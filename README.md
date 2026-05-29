@@ -87,6 +87,7 @@ python -m agent.main set-trusted-http-sources http://192.168.1.50:8081/
 python -m agent.main set-trusted-usb-roots /media /mnt
 python -m agent.main set-source-policy http://192.168.1.50:8081/ 10 01:00 05:00 15
 python -m agent.main list-source-policies
+python -m agent.main set-source-affinity 72 3 20
 python -m agent.main source-health
 python -m agent.main source-events
 python -m agent.main set-retry-cooldown 30

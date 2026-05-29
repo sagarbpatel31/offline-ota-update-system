@@ -33,6 +33,9 @@ class SourceMetricsTests(unittest.TestCase):
                     {"timestamp": "2026-01-01T00:02:00+00:00", "source": "http://source-b.local", "event": "skip"},
                 ],
                 "last_good_source_by_channel": {"stable": "http://source-a.local"},
+                "source_affinity_ttl_hours": 72,
+                "source_channel_decay_threshold": 3,
+                "source_channel_decay_penalty": 20,
                 "source_channel_stats": {
                     "http://source-a.local": {"stable": {"successes": 3, "failures": 1}},
                     "http://source-b.local": {"stable": {"successes": 0, "failures": 2}},
@@ -60,6 +63,7 @@ class SourceMetricsTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["event_counts"]["success"], 1)
         self.assertEqual(payload["summary"]["event_counts"]["failure"], 1)
         self.assertEqual(payload["summary"]["event_counts"]["skip"], 1)
+        self.assertEqual(payload["summary"]["source_affinity_ttl_hours"], 72)
 
 
 if __name__ == "__main__":

@@ -65,6 +65,9 @@ def source_health_metrics() -> dict[str, object]:
             "event_counts": event_counts,
             "last_good_source_by_channel": last_good_sources,
             "source_channel_stats": channel_stats,
+            "source_affinity_ttl_hours": payload.get("source_affinity_ttl_hours", 72),
+            "source_channel_decay_threshold": payload.get("source_channel_decay_threshold", 3),
+            "source_channel_decay_penalty": payload.get("source_channel_decay_penalty", 20),
         },
     }
 
@@ -119,6 +122,9 @@ def policy_state() -> dict[str, object]:
         "source_policies": payload["source_policies"],
         "last_good_source_by_channel": payload["last_good_source_by_channel"],
         "source_channel_stats": payload["source_channel_stats"],
+        "source_affinity_ttl_hours": payload["source_affinity_ttl_hours"],
+        "source_channel_decay_threshold": payload["source_channel_decay_threshold"],
+        "source_channel_decay_penalty": payload["source_channel_decay_penalty"],
         "failure_counts": payload["failure_counts"],
         "source_health": payload["source_health"],
         "retention_keep_releases": payload["retention_keep_releases"],

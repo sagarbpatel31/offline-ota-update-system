@@ -158,6 +158,43 @@ def poll_interval_active(
     return comparison_now < timestamp + timedelta(minutes=poll_interval_minutes)
 
 
+def affinity_active(
+    *,
+    last_success_at: str | None,
+    ttl_hours: int,
+    now: datetime,
+) -> bool:
+    if ttl_hours <= 0:
+        return False
+    timestamp = parse_timestamp(last_success_at)
+    if not timestamp:
+        return False
+    comparison_now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    return comparison_now <= timestamp + timedelta(hours=ttl_hours)
+
+
+def decayed_channel_success_rate(
+    *,
+    successes: int,
+    failures: int,
+    last_failure_at: str | None,
+    decay_threshold: int,
+    decay_penalty: int,
+    now: datetime,
+) -> int:
+    total_attempts = successes + failures
+    base_rate = int((successes * 100) / total_attempts) if total_attempts else 0
+    if failures < decay_threshold:
+        return base_rate
+    recent_failure = parse_timestamp(last_failure_at)
+    if not recent_failure:
+        return max(0, base_rate - decay_penalty)
+    comparison_now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    if comparison_now <= recent_failure + timedelta(hours=24):
+        return max(0, base_rate - decay_penalty)
+    return base_rate
+
+
 def evaluate_manifest_policy(
     manifest: BundleManifest,
     *,
