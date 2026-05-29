@@ -28,8 +28,10 @@ def source_health_metrics() -> dict[str, object]:
     payload = STATE_STORE.load()
     now = datetime.now(timezone.utc)
     source_health = payload.get("source_health", {})
+    source_events = payload.get("source_events", [])
     sources: list[dict[str, object]] = []
     skip_reasons: dict[str, int] = {}
+    event_counts = {"success": 0, "failure": 0, "skip": 0}
     for source, entry in source_health.items():
         source_entry = dict(entry)
         blocked_reason = None
@@ -45,13 +47,20 @@ def source_health_metrics() -> dict[str, object]:
         source_entry["blocked_reason"] = blocked_reason
         sources.append(source_entry)
 
+    for event in source_events:
+        event_type = str(event.get("event"))
+        if event_type in event_counts:
+            event_counts[event_type] += 1
+
     return {
         "sources": sources,
+        "events": source_events[-50:],
         "summary": {
             "total_sources": len(sources),
             "quarantined_sources": sum(1 for source in sources if source["quarantined"]),
             "backoff_sources": sum(1 for source in sources if source["backoff_active"]),
             "skip_reasons": skip_reasons,
+            "event_counts": event_counts,
         },
     }
 
@@ -102,6 +111,7 @@ def policy_state() -> dict[str, object]:
         "source_backoff_base_minutes": payload["source_backoff_base_minutes"],
         "source_quarantine_threshold": payload["source_quarantine_threshold"],
         "source_quarantine_minutes": payload["source_quarantine_minutes"],
+        "source_event_history_limit": payload["source_event_history_limit"],
         "failure_counts": payload["failure_counts"],
         "source_health": payload["source_health"],
         "retention_keep_releases": payload["retention_keep_releases"],

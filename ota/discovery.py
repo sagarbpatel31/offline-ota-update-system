@@ -39,6 +39,7 @@ class DiscoveryCandidate:
     selectable: bool = True
     selection_reason: str | None = None
     source_score: int = 100
+    source_reputation: int = 50
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -60,6 +61,7 @@ class DiscoveryCandidate:
             "selectable": self.selectable,
             "selection_reason": self.selection_reason,
             "source_score": self.source_score,
+            "source_reputation": self.source_reputation,
         }
 
 
@@ -106,6 +108,7 @@ def load_candidate(
     approved = (not approval_required) or (approved_updates is not None and approval_key in approved_updates)
     failure_count = (failure_counts or {}).get(manifest.version, 0)
     source_score = int((source_health or {}).get(source, {}).get("score", 100))
+    source_reputation = int((source_health or {}).get(source, {}).get("reputation", 50))
     allowed_channels = {"stable"} if rollout_channel == "stable" else {"stable", "canary"}
     allowed_rings = {"general"} if rollout_ring == "general" else {"general", rollout_ring}
     selection_reason = None
@@ -159,6 +162,7 @@ def load_candidate(
         selectable=selectable,
         selection_reason=selection_reason,
         source_score=source_score,
+        source_reputation=source_reputation,
     )
 
 
@@ -303,6 +307,7 @@ def select_latest_compatible(candidates: list[dict[str, object]]) -> tuple[int, 
         key=lambda item: (
             parse_version(str(item[1]["version"])),
             int(item[1].get("priority", 0)),
+            int(item[1].get("source_reputation", 50)),
             int(item[1].get("source_score", 100)),
             1 if item[1].get("ring") == "canary" else 0,
             1 if item[1].get("channel") == "canary" else 0,

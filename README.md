@@ -94,6 +94,7 @@ python -m agent.main select-latest
 python -m agent.main approve-discovered 0
 python -m agent.main list-approvals
 python -m agent.main source-health
+python -m agent.main source-events
 python -m agent.main install-discovered --index 0 --activate-command "systemctl restart offline-ota-demo.service"
 python -m agent.main install-latest --activate-command "systemctl restart offline-ota-demo.service"
 ```

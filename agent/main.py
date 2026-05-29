@@ -341,6 +341,42 @@ def source_health() -> dict[str, dict[str, object]]:
     return cast(dict[str, dict[str, object]], STATE_STORE.load().get("source_health", {}))
 
 
+def source_events() -> list[dict[str, object]]:
+    return cast(list[dict[str, object]], STATE_STORE.load().get("source_events", []))
+
+
+def calculate_source_reputation(source: str, events: list[dict[str, object]]) -> int:
+    relevant = [event for event in events if event.get("source") == source][-20:]
+    score = 50
+    for index, event in enumerate(reversed(relevant)):
+        weight = max(1, 5 - (index // 5))
+        event_type = str(event.get("event"))
+        if event_type == "success":
+            score += 4 * weight
+        elif event_type == "failure":
+            score -= 6 * weight
+        elif event_type == "skip":
+            score -= 2 * weight
+    return max(0, min(100, score))
+
+
+def append_source_event(source: str, event: str, *, detail: str | None = None) -> list[dict[str, object]]:
+    state = STATE_STORE.load()
+    history = cast(list[dict[str, object]], state.get("source_events", []))
+    history.append(
+        {
+            "timestamp": utc_now(),
+            "source": source,
+            "event": event,
+            "detail": detail,
+        }
+    )
+    limit = int(state.get("source_event_history_limit", 200))
+    history = history[-limit:]
+    STATE_STORE.update(source_events=history)
+    return history
+
+
 def source_health_entry(source: str) -> dict[str, object]:
     return source_health().get(
         source,
@@ -354,11 +390,13 @@ def source_health_entry(source: str) -> dict[str, object]:
             "last_error": None,
             "backoff_until": None,
             "quarantined_until": None,
+            "reputation": 50,
         },
     )
 
 
 def record_source_success(source: str) -> None:
+    events = append_source_event(source, "success")
     health = source_health()
     current = source_health_entry(source)
     current["score"] = min(100, int(current.get("score", 100)) + 5)
@@ -368,6 +406,7 @@ def record_source_success(source: str) -> None:
     current["last_skip_reason"] = None
     current["backoff_until"] = None
     current["quarantined_until"] = None
+    current["reputation"] = calculate_source_reputation(source, events)
     current["last_seen_at"] = utc_now()
     health[source] = current
     STATE_STORE.update(source_health=health)
@@ -375,6 +414,7 @@ def record_source_success(source: str) -> None:
 
 def record_source_failure(source: str, error: str) -> None:
     state = STATE_STORE.load()
+    events = append_source_event(source, "failure", detail=error)
     health = source_health()
     current = source_health_entry(source)
     current["score"] = max(0, int(current.get("score", 100)) - 20)
@@ -391,11 +431,13 @@ def record_source_failure(source: str, error: str) -> None:
     if int(current["consecutive_failures"]) >= quarantine_threshold:
         quarantine_minutes = int(state.get("source_quarantine_minutes", DEFAULT_SOURCE_QUARANTINE_MINUTES))
         current["quarantined_until"] = (datetime.now(timezone.utc) + timedelta(minutes=quarantine_minutes)).isoformat()
+    current["reputation"] = calculate_source_reputation(source, events)
     health[source] = current
     STATE_STORE.update(source_health=health, last_error=error)
 
 
 def record_source_skip(source: str, reason: str) -> None:
+    events = append_source_event(source, "skip", detail=reason)
     health = source_health()
     current = source_health_entry(source)
     skip_reasons = cast(dict[str, int], current.get("skip_reasons", {}))
@@ -403,6 +445,7 @@ def record_source_skip(source: str, reason: str) -> None:
     current["skip_reasons"] = skip_reasons
     current["skips"] = int(current.get("skips", 0)) + 1
     current["last_skip_reason"] = reason
+    current["reputation"] = calculate_source_reputation(source, events)
     current["last_seen_at"] = utc_now()
     health[source] = current
     STATE_STORE.update(source_health=health)
@@ -529,6 +572,9 @@ def refresh_cached_candidate_flags() -> list[dict[str, object]]:
             selectable=bool(candidate.get("compatible", True)),
             selection_reason=cast(str | None, candidate.get("policy_reason")),
             source_score=int(current_source_health.get(str(candidate["source"]), {}).get("score", candidate.get("source_score", 100))),
+            source_reputation=int(
+                current_source_health.get(str(candidate["source"]), {}).get("reputation", candidate.get("source_reputation", 50))
+            ),
         )
         if refreshed_candidate.channel not in allowed_channels:
             refreshed_candidate.selectable = False
@@ -782,6 +828,11 @@ def list_approvals() -> None:
 @app.command("source-health")
 def source_health_command() -> None:
     typer.echo(json.dumps(source_health(), indent=2))
+
+
+@app.command("source-events")
+def source_events_command(limit: int = 50) -> None:
+    typer.echo(json.dumps(source_events()[-limit:], indent=2))
 
 
 @app.command("approve-discovered")

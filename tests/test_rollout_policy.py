@@ -38,6 +38,34 @@ class RolloutPolicyTests(unittest.TestCase):
         self.assertEqual(index, 1)
         self.assertEqual(candidate["priority"], 5)
 
+    def test_select_latest_compatible_uses_reputation_when_versions_and_priority_match(self) -> None:
+        candidates = [
+            {
+                "version": "2.0.0",
+                "selectable": True,
+                "priority": 5,
+                "source_reputation": 45,
+                "source_score": 90,
+                "channel": "stable",
+                "source_type": "usb",
+                "source": "a",
+            },
+            {
+                "version": "2.0.0",
+                "selectable": True,
+                "priority": 5,
+                "source_reputation": 80,
+                "source_score": 60,
+                "channel": "stable",
+                "source_type": "usb",
+                "source": "b",
+            },
+        ]
+
+        index, candidate = select_latest_compatible(candidates)
+        self.assertEqual(index, 1)
+        self.assertEqual(candidate["source_reputation"], 80)
+
     def test_select_latest_compatible_returns_none_when_no_selectable_candidates(self) -> None:
         self.assertIsNone(select_latest_compatible([{"version": "1.0.0", "selectable": False}]))
 

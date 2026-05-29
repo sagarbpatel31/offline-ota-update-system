@@ -25,14 +25,21 @@ class SourceMetricsTests(unittest.TestCase):
         with patch("server.main.STATE_STORE.load") as mocked_load:
             mocked_load.return_value = {
                 "discovered_bundles": [],
+                "source_events": [
+                    {"timestamp": "2026-01-01T00:00:00+00:00", "source": "http://source-a.local", "event": "success"},
+                    {"timestamp": "2026-01-01T00:01:00+00:00", "source": "http://source-b.local", "event": "failure"},
+                    {"timestamp": "2026-01-01T00:02:00+00:00", "source": "http://source-b.local", "event": "skip"},
+                ],
                 "source_health": {
                     "http://source-a.local": {
                         "score": 40,
+                        "reputation": 70,
                         "skip_reasons": {"source fetch backoff active": 2},
                         "backoff_until": "2099-01-01T00:10:00+00:00",
                     },
                     "http://source-b.local": {
                         "score": 10,
+                        "reputation": 15,
                         "skip_reasons": {"source is quarantined": 1},
                         "quarantined_until": "2099-01-01T01:00:00+00:00",
                     },
@@ -43,6 +50,9 @@ class SourceMetricsTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["backoff_sources"], 1)
         self.assertEqual(payload["summary"]["quarantined_sources"], 1)
         self.assertEqual(payload["summary"]["skip_reasons"]["source fetch backoff active"], 2)
+        self.assertEqual(payload["summary"]["event_counts"]["success"], 1)
+        self.assertEqual(payload["summary"]["event_counts"]["failure"], 1)
+        self.assertEqual(payload["summary"]["event_counts"]["skip"], 1)
 
 
 if __name__ == "__main__":
